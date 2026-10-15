@@ -282,7 +282,7 @@ Static Function CarregaTitulos(cAlias as character, aPar as array) as numeric
     EndIf
 
     If nSituac == SIT_SEM_RISCO
-        cQuery += "   AND SE1.E1_XRISCO <> ? "
+        cQuery += "   AND (SE1.E1_XRISCO <> ?  OR RTRIM(SE1.E1_XRISCO) IS NULL) "
         aAdd(aBind, RS_RISCO_SIM)
     Else
         cQuery += "   AND SE1.E1_XRISCO = ? "
@@ -374,7 +374,7 @@ Static Function DefineColunas(cAlias as character) as array
     aAdd(aDef, {"TR_XBANCO", "Banco Risco" , "@!"                  , TamSX3("E1_XBANCO")[1]  , 0                     , 1})
 
     For nI := 1 To Len(aDef)
-        bDado := &("{|| (" + cAlias + ")->" + aDef[nI][1] + "}")
+        bDado := &("{|| ('" + cAlias + "')->" + aDef[nI][1] + "}")
         // Estrutura da coluna: título, bloco de dados, tipo, máscara, alinhamento, tamanho, decimal,
         // edita, bValid, imagem, bDuploClique, ReadVar, bHeaderClick, deletada, detalhe, opções
         aAdd(aColunas, {aDef[nI][2], bDado, Nil, aDef[nI][3], aDef[nI][6], aDef[nI][4], aDef[nI][5], ;

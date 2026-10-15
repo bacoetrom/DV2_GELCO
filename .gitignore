@@ -1,0 +1,7 @@
+# Arquivos gerados pela extensão TOTVS (binários de classes/funções)
+.vscode/.advpl/
+_binary_*.tlpp
+
+# Configurações locais do VS Code
+.vscode/launch.json
+.vscode/settings.json

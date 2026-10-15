@@ -80,7 +80,8 @@ User Function PXRSFornBanco(cFilTit as character, cBanco as character) as array
 
     cChave := xFilial("SA6", cFilTit) + cBanco
     SA6->(DbSetOrder(1)) // A6_FILIAL+A6_COD+A6_AGENCIA+A6_NUMCON
-    If SA6->(DbSeek(cChave))
+    // Campos do dicionário ainda não criados: retorna vazio em vez de gerar erro de execução
+    If SA6->(FieldPos("A6_XFORN")) > 0 .And. SA6->(FieldPos("A6_XLOJA")) > 0 .And. SA6->(DbSeek(cChave))
         While !SA6->(Eof()) .And. SA6->(A6_FILIAL + A6_COD) == cChave
             If !Empty(SA6->A6_XFORN)
                 aRet := {SA6->A6_XFORN, SA6->A6_XLOJA}
@@ -154,7 +155,9 @@ User Function PXRSValidaGeracao(nRecSE1 as numeric) as character
     cNatureza := PadR(SuperGetMV("MV_XRSNAT", .F., ""), TamSX3("E2_NATUREZ")[1])
     aForn     := U_PXRSFornBanco(cFilTit, SE1->E1_XBANCO)
 
-    If Empty(cNatureza)
+    If SA6->(FieldPos("A6_XFORN")) == 0 .Or. SA6->(FieldPos("A6_XLOJA")) == 0 .Or. SE2->(FieldPos("E2_XORIRS")) == 0
+        cMsg := "Campos do risco sacado não criados no dicionário (A6_XFORN, A6_XLOJA, E2_XORIRS). Crie os campos conforme DICIONARIO.md do projeto."
+    ElseIf Empty(cNatureza)
         cMsg := "Parâmetro MV_XRSNAT (natureza do título a pagar do risco sacado) não informado."
     ElseIf !SED->(DbSeek(xFilial("SED", cFilTit) + cNatureza))
         cMsg := "Natureza '" + AllTrim(cNatureza) + "' do parâmetro MV_XRSNAT não cadastrada."
