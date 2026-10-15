@@ -1,0 +1,271 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+#include "fwmvcdef.ch"
+
+#define RS_RISCO_SIM   "S"
+#define RS_ENVIADO     "1"
+#define RS_NAO_PAGO    "2"
+#define RS_TOLERANCIA  0.0049
+#define RS_OPER_BAIXA  "B"
+#define RS_OPER_ESTOR  "E"
+
+/*/{Protheus.doc} FINM010
+Ponto de entrada MVC do modelo de Baixa a Receber (FINM010 - tabela FK1).
+Usado por todas as rotinas que gravam baixa a receber (FINA070, FINA110, FINA200...).
+
+Risco Sacado:
+  MODELPOS        - bloqueia a baixa de título "Enviado ao Banco" (E1_XSTRIC = 1);
+                    pré-valida a geração do SE2 (status 2) e o estorno (SE2 já pago/em borderô).
+  MODELCOMMITTTS  - dentro da transação: gera o SE2 na baixa NOR que liquida título com status 2;
+                    exclui o SE2 no cancelamento. Em caso de falha, desarma a transação (desfaz a baixa).
+
+PARAMIXB:
+  [1] Object    - modelo (ou submodelo, conforme o ID)
+  [2] Character - ID do ponto de execução
+  [3] Character - ID do formulário
+
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@return variant, lógico nos IDs de validação
+@obs Ver plano __Risco_Sacado/PLANO_RISCO_SACADO.md - itens VAL-001 a VAL-006 devem ser validados em debug.
+@see https://tdn.totvs.com/pages/viewpage.action?pageId=284859148
+/*/
+User Function FINM010() as variant
+    Local aParam   := PARAMIXB as variant
+    Local xRet     := .T. as variant
+    Local cIdPonto := "" as character
+    Local oModel   as object
+    Local oErro    as object
+
+    If ValType(aParam) <> "A" .Or. Len(aParam) < 2
+        Return xRet
+    EndIf
+
+    oModel   := aParam[1]
+    cIdPonto := aParam[2]
+
+    If cIdPonto <> "MODELPOS" .And. cIdPonto <> "MODELCOMMITTTS"
+        Return xRet
+    EndIf
+
+    Try
+        If U_PXRSLogAtivo()
+            LogDiagnostico(oModel, cIdPonto)
+        EndIf
+
+        If cIdPonto == "MODELPOS"
+            xRet := ValidaModelo(oModel)
+        Else
+            ProcessaCommit(oModel)
+        EndIf
+    Catch oErro
+        U_PXRSLog("ERROR", "FINM010/" + cIdPonto + ": " + oErro:Description)
+        If cIdPonto == "MODELCOMMITTTS"
+            DisarmTransaction()
+        EndIf
+    EndTry
+Return xRet
+
+/*/{Protheus.doc} ValidaModelo
+Validação total do modelo da baixa (MODELPOS).
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@param oModel, object, modelo FINM010
+@return logical, .F. bloqueia a baixa/cancelamento
+/*/
+Static Function ValidaModelo(oModel as object) as logical
+    Local aAreaSE1 := SE1->(GetArea()) as array
+    Local lRet     := .T. as logical
+    Local cOper    := "" as character
+    Local cMsg     := "" as character
+    Local cSolucao := "" as character
+
+    cOper := OperacaoBaixa(oModel)
+    If Empty(cOper) .Or. !PosicionaTitulo(oModel) .Or. SE1->E1_XRISCO <> RS_RISCO_SIM
+        RestArea(aAreaSE1)
+        Return lRet
+    EndIf
+
+    If cOper == RS_OPER_BAIXA
+        If SE1->E1_XSTRIC == RS_ENVIADO
+            cMsg     := "Título " + AllTrim(SE1->(E1_PREFIXO + "/" + E1_NUM + "/" + E1_PARCELA)) + ;
+                        " está em Risco Sacado - Enviado ao Banco (lote " + AllTrim(SE1->E1_XLOTRS) + ")."
+            cSolucao := "Informe a situação 'Pago ao Banco' ou 'Não pago ao Banco' na rotina PXFINA37 antes de baixar."
+        ElseIf SE1->E1_XSTRIC == RS_NAO_PAGO .And. MotivoNormal(oModel)
+            cMsg     := U_PXRSValidaGeracao(SE1->(Recno()))
+            cSolucao := "Corrija o cadastro indicado e repita a baixa."
+        EndIf
+    ElseIf cOper == RS_OPER_ESTOR .And. SE1->E1_XSTRIC == RS_NAO_PAGO
+        cMsg     := U_PXRSValidaEstorno(SE1->E1_FILIAL, U_PXRSChaveOrigem())
+        cSolucao := "Regularize o título a pagar do risco sacado e repita o cancelamento."
+    EndIf
+
+    If !Empty(cMsg)
+        lRet := .F.
+        oModel:SetErrorMessage("FK1DETAIL", "", "FK1DETAIL", "", "PXRISCOSAC", cMsg, cSolucao)
+        U_PXRSLog("WARN", "Bloqueio FINM010: " + cMsg)
+    EndIf
+
+    RestArea(aAreaSE1)
+Return lRet
+
+/*/{Protheus.doc} ProcessaCommit
+Gravação dentro da transação (MODELCOMMITTTS): gera ou exclui o SE2 do risco sacado.
+Em caso de falha desarma a transação, desfazendo a baixa/cancelamento.
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@param oModel, object, modelo FINM010
+@return logical, .T. quando processado sem erro
+/*/
+Static Function ProcessaCommit(oModel as object) as logical
+    Local aAreaSE1 := SE1->(GetArea()) as array
+    Local lRet     := .T. as logical
+    Local cOper    := "" as character
+    Local cMsg     := "" as character
+    Local nRecSE2  := 0 as numeric
+
+    cOper := OperacaoBaixa(oModel)
+    If Empty(cOper) .Or. !PosicionaTitulo(oModel) .Or. SE1->E1_XRISCO <> RS_RISCO_SIM .Or. SE1->E1_XSTRIC <> RS_NAO_PAGO
+        RestArea(aAreaSE1)
+        Return lRet
+    EndIf
+
+    If cOper == RS_OPER_BAIXA
+        // Valor total: gera somente na baixa que liquida o título (VAL-003: SE1 já atualizado neste ponto)
+        If MotivoNormal(oModel) .And. SE1->E1_SALDO <= RS_TOLERANCIA
+            cMsg := U_PXRSGeraPagar(SE1->(Recno()))
+        EndIf
+    ElseIf cOper == RS_OPER_ESTOR
+        nRecSE2 := U_PXRSBuscaPagar(SE1->E1_FILIAL, U_PXRSChaveOrigem())
+        If nRecSE2 > 0
+            cMsg := U_PXRSValidaEstorno(SE1->E1_FILIAL, U_PXRSChaveOrigem())
+            If Empty(cMsg)
+                cMsg := U_PXRSExcluiPagar(nRecSE2)
+            EndIf
+        EndIf
+    EndIf
+
+    If !Empty(cMsg)
+        lRet := .F.
+        DisarmTransaction()
+        oModel:SetErrorMessage("FK1DETAIL", "", "FK1DETAIL", "", "PXRISCOSAC", cMsg, "A operação foi desfeita. Corrija o problema e repita.")
+        U_PXRSLog("ERROR", "FINM010 commit desfeito: " + cMsg)
+    EndIf
+
+    RestArea(aAreaSE1)
+Return lRet
+
+/*/{Protheus.doc} OperacaoBaixa
+Identifica se o modelo representa baixa principal ou cancelamento/estorno.
+FK1_TPDOC: VL/BA = registro principal da baixa; ES = estorno (VAL-002).
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@param oModel, object, modelo FINM010
+@return character, "B" baixa, "E" estorno ou vazio para operações não tratadas
+/*/
+Static Function OperacaoBaixa(oModel as object) as character
+    Local cOper  := "" as character
+    Local cTpDoc := "" as character
+    Local nOper  := 0 as numeric
+
+    nOper  := oModel:GetOperation()
+    cTpDoc := AllTrim(oModel:GetValue("FK1DETAIL", "FK1_TPDOC"))
+
+    If nOper == MODEL_OPERATION_DELETE .Or. cTpDoc == "ES"
+        cOper := RS_OPER_ESTOR
+    ElseIf nOper == MODEL_OPERATION_INSERT .And. (cTpDoc == "VL" .Or. cTpDoc == "BA")
+        cOper := RS_OPER_BAIXA
+    EndIf
+Return cOper
+
+/*/{Protheus.doc} MotivoNormal
+Indica se a baixa é por recebimento normal (motivo NOR).
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@param oModel, object, modelo FINM010
+@return logical, .T. quando motivo NOR
+/*/
+Static Function MotivoNormal(oModel as object) as logical
+Return AllTrim(oModel:GetValue("FK1DETAIL", "FK1_MOTBX")) == "NOR"
+
+/*/{Protheus.doc} PosicionaTitulo
+Posiciona a SE1 no título da baixa a partir do FK1_IDDOC -> FK7 (VAL-003).
+Se o SE1 já estiver posicionado no título correto, mantém o posicionamento.
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@param oModel, object, modelo FINM010
+@return logical, .T. quando o título foi localizado
+/*/
+Static Function PosicionaTitulo(oModel as object) as logical
+    Local lRet       := .F. as logical
+    Local cIdDoc     := "" as character
+    Local cQuery     := "" as character
+    Local cAliasQry  := "" as character
+    Local cChave     := "" as character
+    Local oStatement as object
+
+    cIdDoc := oModel:GetValue("FK1DETAIL", "FK1_IDDOC")
+    If Empty(cIdDoc)
+        Return !SE1->(Eof())
+    EndIf
+
+    cQuery := "SELECT FK7.FK7_PREFIX, FK7.FK7_NUM, FK7.FK7_PARCEL, FK7.FK7_TIPO, FK7.FK7_CLIFOR, FK7.FK7_LOJA "
+    cQuery += "  FROM " + RetSqlName("FK7") + " FK7 "
+    cQuery += " WHERE FK7.D_E_L_E_T_ = ? "
+    cQuery += "   AND FK7.FK7_IDDOC = ? "
+    cQuery += "   AND FK7.FK7_ALIAS = ? "
+
+    oStatement := FWExecStatement():New(ChangeQuery(cQuery))
+    oStatement:SetString(1, " ")
+    oStatement:SetString(2, cIdDoc)
+    oStatement:SetString(3, "SE1")
+    cAliasQry := oStatement:OpenAlias(GetNextAlias())
+
+    If !(cAliasQry)->(Eof())
+        cChave := (cAliasQry)->(FK7_CLIFOR + FK7_LOJA + FK7_PREFIX + FK7_NUM + FK7_PARCEL + FK7_TIPO)
+        If !SE1->(Eof()) .And. SE1->(E1_CLIENTE + E1_LOJA + E1_PREFIXO + E1_NUM + E1_PARCELA + E1_TIPO) == cChave
+            lRet := .T.
+        Else
+            SE1->(DbSetOrder(2)) // E1_FILIAL+E1_CLIENTE+E1_LOJA+E1_PREFIXO+E1_NUM+E1_PARCELA+E1_TIPO
+            lRet := SE1->(DbSeek(xFilial("SE1") + cChave))
+        EndIf
+    EndIf
+
+    (cAliasQry)->(DbCloseArea())
+    oStatement:Destroy()
+    oStatement := Nil
+Return lRet
+
+/*/{Protheus.doc} LogDiagnostico
+Registra no log os dados recebidos pelo ponto de entrada (MV_XRSLOG = .T.).
+Usado para as validações VAL-001 a VAL-003 do plano.
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@param oModel, object, modelo FINM010
+@param cIdPonto, character, ID do ponto de execução
+@return logical, sempre .T.
+/*/
+Static Function LogDiagnostico(oModel as object, cIdPonto as character) as logical
+    Local cMsg := "" as character
+
+    cMsg := "FINM010 DIAG | ID=" + cIdPonto
+    cMsg += " | FunName=" + FunName()
+    cMsg += " | Oper=" + cValToChar(oModel:GetOperation())
+    cMsg += " | FK1_TPDOC=" + AllTrim(oModel:GetValue("FK1DETAIL", "FK1_TPDOC"))
+    cMsg += " | FK1_MOTBX=" + AllTrim(oModel:GetValue("FK1DETAIL", "FK1_MOTBX"))
+    cMsg += " | FK1_VALOR=" + cValToChar(oModel:GetValue("FK1DETAIL", "FK1_VALOR"))
+    cMsg += " | FK1_IDDOC=" + AllTrim(oModel:GetValue("FK1DETAIL", "FK1_IDDOC"))
+    If !SE1->(Eof())
+        cMsg += " | SE1=" + SE1->(E1_FILIAL + E1_PREFIXO + E1_NUM + E1_PARCELA + E1_TIPO)
+        cMsg += " | E1_SALDO=" + cValToChar(SE1->E1_SALDO)
+        cMsg += " | E1_XSTRIC=" + SE1->E1_XSTRIC
+    EndIf
+    U_PXRSLog("INFO", cMsg)
+Return .T.

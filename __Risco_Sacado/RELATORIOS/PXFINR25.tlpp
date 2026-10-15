@@ -1,0 +1,176 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+
+#define RS_PARAM_LOAD "PXFINR25"
+#define RS_RISCO_SIM  "S"
+
+// Posições do array de parâmetros (ParamBox)
+#define PAR_FILDE     1
+#define PAR_FILATE    2
+#define PAR_LOTEDE    3
+#define PAR_LOTEATE   4
+#define PAR_SITUAC    5
+
+/*/{Protheus.doc} PXFINR25
+Relatório de Lotes de Risco Sacado.
+Lista os títulos a receber por filial/lote com banco, data de envio, situação,
+valores e totais por lote e geral.
+
+Parâmetros (ParamBox - última seleção salva por usuário, sem dependência de SX1):
+  01 Filial de / 02 Filial até / 03 Lote de / 04 Lote até /
+  05 Situação (1=Todas;2=Enviado ao Banco;3=Não pago ao Banco;4=Pago ao Banco)
+
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@return logical, .T. quando o relatório foi exibido
+/*/
+User Function PXFINR25() as logical
+    Local aPar    := {} as array
+    Local oReport as object
+
+    aPar := Parametros()
+    If Empty(aPar)
+        Return .F.
+    EndIf
+
+    oReport := ReportDef(aPar)
+    oReport:PrintDialog()
+Return .T.
+
+/*/{Protheus.doc} Parametros
+Exibe a tela de parâmetros (ParamBox) e devolve as respostas.
+A situação (combo) é normalizada para numérico.
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@return array, respostas na ordem das constantes PAR_* ou vazio quando cancelado
+/*/
+Static Function Parametros() as array
+    Local aPergs    := {} as array
+    Local aRet      := {} as array
+    Local aSituacao := {} as array
+    Local nTamFil   := TamSX3("E1_FILIAL")[1] as numeric
+    Local nTamLote  := TamSX3("E1_XLOTRS")[1] as numeric
+
+    aSituacao := {"1-Todas", "2-Enviado ao Banco", "3-Não pago ao Banco", "4-Pago ao Banco"}
+
+    aAdd(aPergs, {1, "Filial de" , Space(nTamFil)          , "@!", ".T.", "SM0", ".T.", 50, .F.})
+    aAdd(aPergs, {1, "Filial até", Replicate("Z", nTamFil) , "@!", ".T.", "SM0", ".T.", 50, .T.})
+    aAdd(aPergs, {1, "Lote de"   , Space(nTamLote)         , "@!", ".T.", ""   , ".T.", 40, .F.})
+    aAdd(aPergs, {1, "Lote até"  , Replicate("Z", nTamLote), "@!", ".T.", ""   , ".T.", 40, .T.})
+    aAdd(aPergs, {2, "Situação"  , aSituacao[1]            , aSituacao, 90, ".T.", .T.})
+
+    If !ParamBox(aPergs, "Lotes de Risco Sacado - Parâmetros", @aRet, , , , , , , RS_PARAM_LOAD, .T., .T.)
+        Return {}
+    EndIf
+
+    If ValType(aRet[PAR_SITUAC]) == "C"
+        aRet[PAR_SITUAC] := Val(Left(aRet[PAR_SITUAC], 1))
+    EndIf
+Return aRet
+
+/*/{Protheus.doc} ReportDef
+Definição do relatório (TReport).
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@param aPar, array, respostas dos parâmetros (ParamBox)
+@return object, instância de TReport
+/*/
+Static Function ReportDef(aPar as array) as object
+    Local cAlias   := GetNextAlias() as character
+    Local oReport  as object
+    Local oSection as object
+    Local oBreak   as object
+
+    oReport := TReport():New("PXFINR25", "Lotes de Risco Sacado", , {|oRep| ReportPrint(oRep, cAlias, aPar)}, ;
+                             "Relação dos títulos a receber enviados ao banco em Risco Sacado, por lote.")
+    oReport:SetLandscape()
+    oReport:SetTotalInLine(.F.)
+
+    oSection := TRSection():New(oReport, "Títulos do lote", {"SE1"})
+    TRCell():New(oSection, "FILIAL"  , , "Filial"       , "@!"                  , TamSX3("E1_FILIAL")[1]  , , {|| (cAlias)->E1_FILIAL})
+    TRCell():New(oSection, "LOTE"    , , "Lote"         , "@!"                  , TamSX3("E1_XLOTRS")[1]  , , {|| (cAlias)->E1_XLOTRS})
+    TRCell():New(oSection, "BANCO"   , , "Banco"        , "@!"                  , TamSX3("E1_XBANCO")[1]  , , {|| (cAlias)->E1_XBANCO})
+    TRCell():New(oSection, "DTENVIO" , , "Dt. Envio"    , ""                    , 10                      , , {|| StoD((cAlias)->E1_XDTRISC)})
+    TRCell():New(oSection, "SITUACAO", , "Situação"     , "@!"                  , 20                      , , {|| U_PXRSDescSituacao((cAlias)->E1_XRISCO, (cAlias)->E1_XSTRIC)})
+    TRCell():New(oSection, "PREFIXO" , , "Prefixo"      , "@!"                  , TamSX3("E1_PREFIXO")[1] , , {|| (cAlias)->E1_PREFIXO})
+    TRCell():New(oSection, "NUMERO"  , , "Número"       , "@!"                  , TamSX3("E1_NUM")[1]     , , {|| (cAlias)->E1_NUM})
+    TRCell():New(oSection, "PARCELA" , , "Parcela"      , "@!"                  , TamSX3("E1_PARCELA")[1] , , {|| (cAlias)->E1_PARCELA})
+    TRCell():New(oSection, "TIPO"    , , "Tipo"         , "@!"                  , TamSX3("E1_TIPO")[1]    , , {|| (cAlias)->E1_TIPO})
+    TRCell():New(oSection, "CLIENTE" , , "Cliente"      , "@!"                  , TamSX3("E1_CLIENTE")[1] , , {|| (cAlias)->E1_CLIENTE})
+    TRCell():New(oSection, "LOJA"    , , "Loja"         , "@!"                  , TamSX3("E1_LOJA")[1]    , , {|| (cAlias)->E1_LOJA})
+    TRCell():New(oSection, "NOME"    , , "Nome"         , "@!"                  , TamSX3("E1_NOMCLI")[1]  , , {|| (cAlias)->E1_NOMCLI})
+    TRCell():New(oSection, "VENCREA" , , "Vencto Real"  , ""                    , 10                      , , {|| StoD((cAlias)->E1_VENCREA)})
+    TRCell():New(oSection, "VALOR"   , , "Valor"        , X3Picture("E1_VALOR") , TamSX3("E1_VALOR")[1]   , , {|| (cAlias)->E1_VALOR})
+    TRCell():New(oSection, "SALDO"   , , "Saldo"        , X3Picture("E1_SALDO") , TamSX3("E1_SALDO")[1]   , , {|| (cAlias)->E1_SALDO})
+
+    oBreak := TRBreak():New(oSection, {|| (cAlias)->(E1_FILIAL + E1_XLOTRS)}, "Total do lote:", .F.)
+    TRFunction():New(oSection:Cell("NUMERO"), "QTDLOTE", "COUNT", oBreak,,,, .F., .T.)
+    TRFunction():New(oSection:Cell("VALOR") , "VLRLOTE", "SUM"  , oBreak,,,, .F., .T.)
+    TRFunction():New(oSection:Cell("SALDO") , "SLDLOTE", "SUM"  , oBreak,,,, .F., .T.)
+Return oReport
+
+/*/{Protheus.doc} ReportPrint
+Impressão do relatório: seleciona os títulos dos lotes e imprime as linhas.
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@param oReport, object, instância de TReport
+@param cAlias, character, alias da consulta
+@param aPar, array, respostas dos parâmetros (ParamBox)
+@return logical, sempre .T.
+/*/
+Static Function ReportPrint(oReport as object, cAlias as character, aPar as array) as logical
+    Local aBind      := {} as array
+    Local cQuery     := "" as character
+    Local nI         := 0 as numeric
+    Local nSituac    := 0 as numeric
+    Local oSection   := oReport:Section(1) as object
+    Local oStatement as object
+
+    nSituac := aPar[PAR_SITUAC]
+
+    cQuery := "SELECT SE1.E1_FILIAL, SE1.E1_XLOTRS, SE1.E1_XBANCO, SE1.E1_XDTRISC, SE1.E1_XRISCO, SE1.E1_XSTRIC, "
+    cQuery += "       SE1.E1_PREFIXO, SE1.E1_NUM, SE1.E1_PARCELA, SE1.E1_TIPO, SE1.E1_CLIENTE, SE1.E1_LOJA, "
+    cQuery += "       SE1.E1_NOMCLI, SE1.E1_VENCREA, SE1.E1_VALOR, SE1.E1_SALDO "
+    cQuery += "  FROM " + RetSqlName("SE1") + " SE1 "
+    cQuery += " WHERE SE1.D_E_L_E_T_ = ? "
+    aAdd(aBind, " ")
+    cQuery += "   AND SE1.E1_FILIAL BETWEEN ? AND ? "
+    aAdd(aBind, aPar[PAR_FILDE])
+    aAdd(aBind, aPar[PAR_FILATE])
+    cQuery += "   AND SE1.E1_XLOTRS BETWEEN ? AND ? "
+    aAdd(aBind, aPar[PAR_LOTEDE])
+    aAdd(aBind, aPar[PAR_LOTEATE])
+    cQuery += "   AND SE1.E1_XLOTRS <> ? "
+    aAdd(aBind, Space(TamSX3("E1_XLOTRS")[1]))
+    cQuery += "   AND SE1.E1_XRISCO = ? "
+    aAdd(aBind, RS_RISCO_SIM)
+    If nSituac >= 2 .And. nSituac <= 4
+        cQuery += "   AND SE1.E1_XSTRIC = ? "
+        aAdd(aBind, cValToChar(nSituac - 1))
+    EndIf
+    cQuery += " ORDER BY SE1.E1_FILIAL, SE1.E1_XLOTRS, SE1.E1_PREFIXO, SE1.E1_NUM, SE1.E1_PARCELA, SE1.E1_TIPO "
+
+    oStatement := FWExecStatement():New(ChangeQuery(cQuery))
+    For nI := 1 To Len(aBind)
+        oStatement:SetString(nI, aBind[nI])
+    Next nI
+    oStatement:OpenAlias(cAlias)
+
+    oSection:Init()
+    While !(cAlias)->(Eof())
+        If oReport:Cancel()
+            Exit
+        EndIf
+        oSection:PrintLine()
+        (cAlias)->(DbSkip())
+    EndDo
+    oSection:Finish()
+
+    (cAlias)->(DbCloseArea())
+    oStatement:Destroy()
+    oStatement := Nil
+Return .T.

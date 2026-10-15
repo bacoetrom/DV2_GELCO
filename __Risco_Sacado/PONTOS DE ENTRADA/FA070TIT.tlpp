@@ -1,0 +1,44 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+
+#define RS_RISCO_SIM "S"
+#define RS_ENVIADO   "1"
+
+/*/{Protheus.doc} FA070TIT
+Ponto de entrada de confirmação da baixa a receber (FINA070).
+Risco Sacado: impede a baixa de título com situação "Enviado ao Banco" (E1_XSTRIC = 1),
+exigindo que o usuário informe antes "Pago ao Banco" ou "Não pago ao Banco" (rotina PXFINA37).
+Barreira antecipada; a regra também é garantida no PE MVC FINM010 (MODELPOS) para as demais rotinas.
+
+PARAMIXB: não recebe parâmetros. SE1 posicionado no título em baixa.
+
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@return logical, .T. permite a baixa, .F. bloqueia
+@obs Executa também na rotina automática (lF070Auto): nesse caso a mensagem vai para AutoGrLog.
+@see https://tdn.totvs.com/pages/viewpage.action?pageId=719671558
+/*/
+User Function FA070TIT() as logical
+    Local lRet  := .T. as logical
+    Local lAuto := .F. as logical
+    Local cMsg  := "" as character
+
+    If SE1->E1_XRISCO == RS_RISCO_SIM .And. SE1->E1_XSTRIC == RS_ENVIADO
+        lRet := .F.
+        cMsg := "Título " + AllTrim(SE1->(E1_PREFIXO + "/" + E1_NUM + "/" + E1_PARCELA)) + ;
+                " está em Risco Sacado - Enviado ao Banco (lote " + AllTrim(SE1->E1_XLOTRS) + "). " + ;
+                "Informe 'Pago ao Banco' ou 'Não pago ao Banco' na rotina PXFINA37 antes de baixar."
+
+        If Type("lF070Auto") == "L"
+            lAuto := lF070Auto
+        EndIf
+
+        If lAuto .Or. IsBlind()
+            AutoGrLog(cMsg)
+        Else
+            Help(,, "PXRISCOSAC",, cMsg, 1, 0)
+        EndIf
+        U_PXRSLog("WARN", "FA070TIT bloqueio: " + cMsg)
+    EndIf
+Return lRet

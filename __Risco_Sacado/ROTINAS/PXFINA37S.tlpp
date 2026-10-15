@@ -1,0 +1,376 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+
+#define RS_RISCO_SIM   "S"
+#define RS_ENVIADO     "1"
+#define RS_NAO_PAGO    "2"
+#define RS_PAGO        "3"
+#define RS_TOLERANCIA  0.0049
+
+/*/{Protheus.doc} PXFINA37S
+Serviços do processo de Risco Sacado (SE1 -> SE2).
+Funções compartilhadas pela tela PXFINA37, pelos pontos de entrada FINM010/FA070TIT
+e pelo relatório PXFINR25.
+
+Domínio do campo E1_XSTRIC:
+  1 = Enviado ao Banco    (baixa bloqueada)
+  2 = Não pago ao Banco   (baixa NOR que liquida o título gera SE2 para o fornecedor do banco)
+  3 = Pago ao Banco       (baixa manual pelo usuário, sem SE2)
+
+Parâmetros:
+  MV_XRSNAT - Natureza do título a pagar gerado
+  MV_XRSLOG - Liga log de diagnóstico (FWLogMsg) dos pontos de entrada
+
+@type function
+@author bacoetrom
+@since 13/10/2026
+/*/
+
+/*/{Protheus.doc} PXRSChaveOrigem
+Monta a chave de rastreio do título a receber posicionado (gravada em E2_XORIRS).
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@return character, E1_FILIAL + E1_PREFIXO + E1_NUM + E1_PARCELA + E1_TIPO
+/*/
+User Function PXRSChaveOrigem() as character
+Return SE1->(E1_FILIAL + E1_PREFIXO + E1_NUM + E1_PARCELA + E1_TIPO)
+
+/*/{Protheus.doc} PXRSDescSituacao
+Retorna a descrição da situação de risco sacado.
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@param cRisco, character, conteúdo de E1_XRISCO
+@param cStatus, character, conteúdo de E1_XSTRIC
+@return character, descrição da situação
+/*/
+User Function PXRSDescSituacao(cRisco as character, cStatus as character) as character
+    Local cDesc := "Sem risco" as character
+
+    If cRisco == RS_RISCO_SIM
+        If cStatus == RS_ENVIADO
+            cDesc := "Enviado ao Banco"
+        ElseIf cStatus == RS_NAO_PAGO
+            cDesc := "Não pago ao Banco"
+        ElseIf cStatus == RS_PAGO
+            cDesc := "Pago ao Banco"
+        Else
+            cDesc := "Risco sem situação"
+        EndIf
+    EndIf
+Return cDesc
+
+/*/{Protheus.doc} PXRSFornBanco
+Retorna o fornecedor/loja configurado no banco (A6_XFORN/A6_XLOJA).
+Como E1_XBANCO guarda apenas o código do banco, é usada a primeira
+agência/conta do banco que possua o fornecedor preenchido.
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@param cFilTit, character, filial do título (para o xFilial da SA6)
+@param cBanco, character, código do banco (A6_COD)
+@return array, {cFornecedor, cLoja} - vazios quando não configurado
+/*/
+User Function PXRSFornBanco(cFilTit as character, cBanco as character) as array
+    Local aArea    := GetArea() as array
+    Local aAreaSA6 := SA6->(GetArea()) as array
+    Local aRet     := {"", ""} as array
+    Local cChave   := "" as character
+
+    cChave := xFilial("SA6", cFilTit) + cBanco
+    SA6->(DbSetOrder(1)) // A6_FILIAL+A6_COD+A6_AGENCIA+A6_NUMCON
+    If SA6->(DbSeek(cChave))
+        While !SA6->(Eof()) .And. SA6->(A6_FILIAL + A6_COD) == cChave
+            If !Empty(SA6->A6_XFORN)
+                aRet := {SA6->A6_XFORN, SA6->A6_XLOJA}
+                Exit
+            EndIf
+            SA6->(DbSkip())
+        EndDo
+    EndIf
+
+    RestArea(aAreaSA6)
+    RestArea(aArea)
+Return aRet
+
+/*/{Protheus.doc} PXRSBuscaPagar
+Localiza o título a pagar gerado pelo risco sacado a partir da chave de origem.
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@param cFilTit, character, filial do título a receber
+@param cChave, character, chave de origem (U_PXRSChaveOrigem)
+@return numeric, R_E_C_N_O_ da SE2 ou 0 quando não existir
+/*/
+User Function PXRSBuscaPagar(cFilTit as character, cChave as character) as numeric
+    Local cQuery     := "" as character
+    Local nRecno     := 0 as numeric
+    Local xRet       as variant
+    Local oStatement as object
+
+    cQuery := "SELECT MAX(SE2.R_E_C_N_O_) RECSE2 "
+    cQuery += "  FROM " + RetSqlName("SE2") + " SE2 "
+    cQuery += " WHERE SE2.D_E_L_E_T_ = ? "
+    cQuery += "   AND SE2.E2_FILIAL = ? "
+    cQuery += "   AND SE2.E2_XORIRS = ? "
+
+    oStatement := FWExecStatement():New(ChangeQuery(cQuery))
+    oStatement:SetString(1, " ")
+    oStatement:SetString(2, xFilial("SE2", cFilTit))
+    oStatement:SetString(3, PadR(cChave, TamSX3("E2_XORIRS")[1]))
+    xRet := oStatement:ExecScalar("RECSE2")
+    oStatement:Destroy()
+    oStatement := Nil
+
+    If ValType(xRet) == "N"
+        nRecno := xRet
+    EndIf
+Return nRecno
+
+/*/{Protheus.doc} PXRSValidaGeracao
+Pré-validação da geração do título a pagar (executada no MODELPOS do FINM010,
+antes da gravação da baixa, para evitar falhas dentro da transação).
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@param nRecSE1, numeric, R_E_C_N_O_ do título a receber
+@return character, mensagem de erro ou vazio quando válido
+/*/
+User Function PXRSValidaGeracao(nRecSE1 as numeric) as character
+    Local aArea     := GetArea() as array
+    Local aAreaSE1  := SE1->(GetArea()) as array
+    Local aAreaSED  := SED->(GetArea()) as array
+    Local aAreaSA2  := SA2->(GetArea()) as array
+    Local aForn     := {} as array
+    Local cMsg      := "" as character
+    Local cNatureza := "" as character
+    Local cFilTit   := "" as character
+
+    SED->(DbSetOrder(1)) // ED_FILIAL+ED_CODIGO
+    SA2->(DbSetOrder(1)) // A2_FILIAL+A2_COD+A2_LOJA
+    SE1->(DbGoTo(nRecSE1))
+    cFilTit   := SE1->E1_FILIAL
+    cNatureza := PadR(SuperGetMV("MV_XRSNAT", .F., ""), TamSX3("E2_NATUREZ")[1])
+    aForn     := U_PXRSFornBanco(cFilTit, SE1->E1_XBANCO)
+
+    If Empty(cNatureza)
+        cMsg := "Parâmetro MV_XRSNAT (natureza do título a pagar do risco sacado) não informado."
+    ElseIf !SED->(DbSeek(xFilial("SED", cFilTit) + cNatureza))
+        cMsg := "Natureza '" + AllTrim(cNatureza) + "' do parâmetro MV_XRSNAT não cadastrada."
+    ElseIf Empty(aForn[1])
+        cMsg := "Banco '" + AllTrim(SE1->E1_XBANCO) + "' sem fornecedor (A6_XFORN/A6_XLOJA) informado na filial " + AllTrim(cFilTit) + "."
+    ElseIf !SA2->(DbSeek(xFilial("SA2", cFilTit) + aForn[1] + aForn[2]))
+        cMsg := "Fornecedor " + AllTrim(aForn[1]) + "/" + AllTrim(aForn[2]) + " do banco '" + AllTrim(SE1->E1_XBANCO) + "' não cadastrado."
+    ElseIf U_PXRSBuscaPagar(cFilTit, U_PXRSChaveOrigem()) > 0
+        cMsg := "Já existe título a pagar de risco sacado gerado para este título."
+    EndIf
+
+    RestArea(aAreaSA2)
+    RestArea(aAreaSED)
+    RestArea(aAreaSE1)
+    RestArea(aArea)
+Return cMsg
+
+/*/{Protheus.doc} PXRSGeraPagar
+Gera o título a pagar (SE2) como cópia do título a receber, alterando apenas
+fornecedor/loja (SA6 do E1_XBANCO) e natureza (MV_XRSNAT).
+Executado dentro da transação da baixa (MODELCOMMITTTS do FINM010): não usa interface.
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@param nRecSE1, numeric, R_E_C_N_O_ do título a receber
+@return character, mensagem de erro ou vazio quando gerado com sucesso
+/*/
+User Function PXRSGeraPagar(nRecSE1 as numeric) as character
+    Local aArea     := GetArea() as array
+    Local aAreaSE1  := SE1->(GetArea()) as array
+    Local aTitulo   := {} as array
+    Local aForn     := {} as array
+    Local aCopia    := {} as array
+    Local cMsg      := "" as character
+    Local cNatureza := "" as character
+    Local cHist     := "" as character
+    Local nI        := 0 as numeric
+    Local oModelBkp as object
+    Private lMsErroAuto    := .F.
+    Private lAutoErrNoFile := .T.
+
+    cMsg := U_PXRSValidaGeracao(nRecSE1)
+    If !Empty(cMsg)
+        RestArea(aAreaSE1)
+        RestArea(aArea)
+        Return cMsg
+    EndIf
+
+    SE1->(DbGoTo(nRecSE1))
+    aForn     := U_PXRSFornBanco(SE1->E1_FILIAL, SE1->E1_XBANCO)
+    cNatureza := PadR(SuperGetMV("MV_XRSNAT", .F., ""), TamSX3("E2_NATUREZ")[1])
+    cHist     := AllTrim(SE1->E1_HIST)
+    If Empty(cHist)
+        cHist := "RISCO SACADO LOTE " + AllTrim(SE1->E1_XLOTRS)
+    EndIf
+
+    aAdd(aTitulo, {"E2_PREFIXO", SE1->E1_PREFIXO           , Nil})
+    aAdd(aTitulo, {"E2_NUM"    , SE1->E1_NUM               , Nil})
+    aAdd(aTitulo, {"E2_PARCELA", SE1->E1_PARCELA           , Nil})
+    aAdd(aTitulo, {"E2_TIPO"   , SE1->E1_TIPO              , Nil})
+    aAdd(aTitulo, {"E2_NATUREZ", cNatureza                 , Nil})
+    aAdd(aTitulo, {"E2_FORNECE", aForn[1]                  , Nil})
+    aAdd(aTitulo, {"E2_LOJA"   , aForn[2]                  , Nil})
+    aAdd(aTitulo, {"E2_EMISSAO", SE1->E1_EMISSAO           , Nil})
+    aAdd(aTitulo, {"E2_VENCTO" , SE1->E1_VENCTO            , Nil})
+    aAdd(aTitulo, {"E2_VENCREA", SE1->E1_VENCREA           , Nil})
+    aAdd(aTitulo, {"E2_VALOR"  , SE1->E1_VALOR             , Nil})
+    aAdd(aTitulo, {"E2_MOEDA"  , SE1->E1_MOEDA             , Nil})
+    aAdd(aTitulo, {"E2_HIST"   , Left(cHist, TamSX3("E2_HIST")[1]), Nil})
+    aAdd(aTitulo, {"E2_XORIRS" , U_PXRSChaveOrigem()       , Nil})
+
+    // Demais informações do título original (somente quando o campo existe nas duas tabelas)
+    aCopia := { {"E1_TXMOEDA", "E2_TXMOEDA"}, ;
+                {"E1_CCD"    , "E2_CCD"    }, ;
+                {"E1_CCC"    , "E2_CCC"    }, ;
+                {"E1_ITEMD"  , "E2_ITEMD"  }, ;
+                {"E1_ITEMC"  , "E2_ITEMC"  }, ;
+                {"E1_CLVLDB" , "E2_CLVLDB" }, ;
+                {"E1_CLVLCR" , "E2_CLVLCR" } }
+    For nI := 1 To Len(aCopia)
+        If SE1->(FieldPos(aCopia[nI][1])) > 0 .And. SE2->(FieldPos(aCopia[nI][2])) > 0
+            If !Empty(SE1->(FieldGet(FieldPos(aCopia[nI][1]))))
+                aAdd(aTitulo, {aCopia[nI][2], SE1->(FieldGet(FieldPos(aCopia[nI][1]))), Nil})
+            EndIf
+        EndIf
+    Next nI
+
+    oModelBkp := FWModelActive()
+    MsExecAuto({|x, y| FinA050(x,, y)}, aTitulo, 3)
+    If ValType(oModelBkp) == "O"
+        FWModelActive(oModelBkp)
+    EndIf
+
+    If lMsErroAuto
+        cMsg := "Falha ao gerar o título a pagar do risco sacado." + CRLF + MontaErroAuto()
+    Else
+        U_PXRSLog("INFO", "Título a pagar gerado: " + U_PXRSChaveOrigem() + " -> fornecedor " + AllTrim(aForn[1]) + "/" + AllTrim(aForn[2]))
+    EndIf
+
+    RestArea(aAreaSE1)
+    RestArea(aArea)
+Return cMsg
+
+/*/{Protheus.doc} PXRSValidaEstorno
+Valida se o título a pagar gerado pode ser excluído no cancelamento da baixa.
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@param cFilTit, character, filial do título a receber
+@param cChave, character, chave de origem (U_PXRSChaveOrigem)
+@return character, mensagem de erro ou vazio quando permitido
+/*/
+User Function PXRSValidaEstorno(cFilTit as character, cChave as character) as character
+    Local aArea    := GetArea() as array
+    Local aAreaSE2 := SE2->(GetArea()) as array
+    Local cMsg     := "" as character
+    Local nRecSE2  := 0 as numeric
+
+    nRecSE2 := U_PXRSBuscaPagar(cFilTit, cChave)
+    If nRecSE2 > 0
+        SE2->(DbGoTo(nRecSE2))
+        If !Empty(SE2->E2_BAIXA) .Or. SE2->E2_SALDO < SE2->E2_VALOR - RS_TOLERANCIA
+            cMsg := "O título a pagar do risco sacado " + AllTrim(SE2->(E2_PREFIXO + "/" + E2_NUM + "/" + E2_PARCELA)) + ;
+                    " já possui baixa. Cancele a baixa do título a pagar antes de cancelar esta baixa."
+        ElseIf !Empty(SE2->E2_NUMBOR)
+            cMsg := "O título a pagar do risco sacado " + AllTrim(SE2->(E2_PREFIXO + "/" + E2_NUM + "/" + E2_PARCELA)) + ;
+                    " está no borderô " + AllTrim(SE2->E2_NUMBOR) + ". Retire-o do borderô antes de cancelar esta baixa."
+        EndIf
+    EndIf
+
+    RestArea(aAreaSE2)
+    RestArea(aArea)
+Return cMsg
+
+/*/{Protheus.doc} PXRSExcluiPagar
+Exclui o título a pagar gerado pelo risco sacado (cancelamento da baixa do receber).
+Executado dentro da transação: não usa interface.
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@param nRecSE2, numeric, R_E_C_N_O_ do título a pagar
+@return character, mensagem de erro ou vazio quando excluído com sucesso
+/*/
+User Function PXRSExcluiPagar(nRecSE2 as numeric) as character
+    Local aArea     := GetArea() as array
+    Local aAreaSE2  := SE2->(GetArea()) as array
+    Local aTitulo   := {} as array
+    Local cMsg      := "" as character
+    Local cChave    := "" as character
+    Local oModelBkp as object
+    Private lMsErroAuto    := .F.
+    Private lAutoErrNoFile := .T.
+
+    SE2->(DbGoTo(nRecSE2))
+    cChave := SE2->(E2_FILIAL + E2_PREFIXO + E2_NUM + E2_PARCELA + E2_TIPO + E2_FORNECE + E2_LOJA)
+
+    aAdd(aTitulo, {"E2_FILIAL" , SE2->E2_FILIAL , Nil})
+    aAdd(aTitulo, {"E2_PREFIXO", SE2->E2_PREFIXO, Nil})
+    aAdd(aTitulo, {"E2_NUM"    , SE2->E2_NUM    , Nil})
+    aAdd(aTitulo, {"E2_PARCELA", SE2->E2_PARCELA, Nil})
+    aAdd(aTitulo, {"E2_TIPO"   , SE2->E2_TIPO   , Nil})
+    aAdd(aTitulo, {"E2_FORNECE", SE2->E2_FORNECE, Nil})
+    aAdd(aTitulo, {"E2_LOJA"   , SE2->E2_LOJA   , Nil})
+
+    oModelBkp := FWModelActive()
+    MsExecAuto({|x, y| FinA050(x,, y)}, aTitulo, 5)
+    If ValType(oModelBkp) == "O"
+        FWModelActive(oModelBkp)
+    EndIf
+
+    If lMsErroAuto
+        cMsg := "Falha ao excluir o título a pagar do risco sacado " + AllTrim(cChave) + "." + CRLF + MontaErroAuto()
+    Else
+        U_PXRSLog("INFO", "Título a pagar do risco sacado excluído: " + AllTrim(cChave))
+    EndIf
+
+    RestArea(aAreaSE2)
+    RestArea(aArea)
+Return cMsg
+
+/*/{Protheus.doc} PXRSLog
+Registra mensagem no log do servidor (FWLogMsg).
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@param cNivel, character, severidade (INFO, WARN, ERROR)
+@param cMsg, character, mensagem
+@return logical, sempre .T.
+/*/
+User Function PXRSLog(cNivel as character, cMsg as character) as logical
+    FWLogMsg(cNivel, , "RISCOSACADO", "PXFINA37", , "01", cMsg, 0, 0, {})
+Return .T.
+
+/*/{Protheus.doc} PXRSLogAtivo
+Indica se o log de diagnóstico dos pontos de entrada está ligado (MV_XRSLOG).
+@type user function
+@author bacoetrom
+@since 13/10/2026
+@return logical, .T. quando o diagnóstico está ativo
+/*/
+User Function PXRSLogAtivo() as logical
+Return SuperGetMV("MV_XRSLOG", .F., .F.)
+
+/*/{Protheus.doc} MontaErroAuto
+Converte o log da rotina automática (GetAutoGRLog) em texto.
+@type static function
+@author bacoetrom
+@since 13/10/2026
+@return character, mensagens de erro concatenadas
+/*/
+Static Function MontaErroAuto() as character
+    Local aErros := GetAutoGRLog() as array
+    Local cTexto := "" as character
+    Local nI     := 0 as numeric
+
+    For nI := 1 To Len(aErros)
+        cTexto += AllTrim(aErros[nI]) + CRLF
+    Next nI
+Return cTexto
