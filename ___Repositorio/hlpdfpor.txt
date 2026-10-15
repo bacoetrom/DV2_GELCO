@@ -1,0 +1,6 @@
+000186PA1_METR                      USER                                                        Média de atrasos (em dias)  dos
+títulosquitados pelo cliente. O sistema
+recal-cula este campo a cada baixa com
+base noatraso do título e no  campo
+número  depagamentos (A1_NROPAG).
+000000PA6_XFORN                     USER                                                        000000PA6_XLOJA                     USER                                                        000000PE1_XRISCO                    USER                                                        000000PE1_XLOTRS                    USER                                                        000000PE1_XBANCO                    USER                                                        000000PE1_XDTRISC                   USER                                                        000000PE1_XSTRIC                    USER                                                        000000PE2_XORIRS                    USER                                                        

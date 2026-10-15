@@ -1,0 +1,81 @@
+MANIFESTO DE ATUALIZAÇÃO
+
+Data : 15/10/2026
+Hora : 13:26:18
+Arquivo de atualização diferencial baseado em projeto gerado pelo Configurador
+Projeto : 000001
+Descrição : GELCO                                             
+Versão : 0002
+Release de referência : 12.1.2510 
+Responsável pelo Projeto: 000000 - Administrador
+Geração do Pacote: 000000 - Administrador
+-----------------------------
+Componentes do arquivo de atualização :
+
+------------
+SIX
+
+Operação:Inclusão ou Alteração
+Tabela : SE1
+Ordem : T
+
+Operação:Inclusão ou Alteração
+Tabela : SE2
+Ordem : I
+
+
+------------
+SX3
+
+Operação:Inclusão ou Alteração
+Campo : A1_METR   
+
+Operação:Inclusão ou Alteração
+Campo : A6_XFORN  
+
+Operação:Inclusão ou Alteração
+Campo : A6_XLOJA  
+
+Operação:Inclusão ou Alteração
+Campo : E1_XRISCO 
+
+Operação:Inclusão ou Alteração
+Campo : E1_XLOTRS 
+
+Operação:Inclusão ou Alteração
+Campo : E1_XBANCO 
+
+Operação:Inclusão ou Alteração
+Campo : E1_XDTRISC
+
+Operação:Inclusão ou Alteração
+Campo : E1_XSTRIC 
+
+Operação:Inclusão ou Alteração
+Campo : E2_XORIRS 
+
+
+------------
+SX6
+
+Operação:Inclusão ou Alteração
+Filial :   
+Parâmetro : MV_XRSLOG 
+
+Operação:Inclusão ou Alteração
+Filial :   
+Parâmetro : MV_XRSNAT 
+
+
+------------
+Helps (hlppack*.txt)
+
+Chave : A1_METR   
+Chave : A6_XFORN  
+Chave : A6_XLOJA  
+Chave : E1_XRISCO 
+Chave : E1_XLOTRS 
+Chave : E1_XBANCO 
+Chave : E1_XDTRISC
+Chave : E1_XSTRIC 
+Chave : E2_XORIRS 
