@@ -1,9 +1,9 @@
 /*
-Programa.: tcBco637.prw
+Programa.: tcBco2637.prw
 Tipo.....: Classe 
 Autor....: William Campana
 Data.....: 12/11/2018
-Descrição: Classe especializada para impressão de boleto bancário do Banco do Sofisa (637) 
+Descrição: Classe especializada para impressão de boleto bancário do Banco do Sofisa (637) - layout Itaú - EE_SUBCTA 002 
 Notas....: Os método da classe pai podem ser especializados na classe filho se houver necessidade 
 		   de definir padrões diferentes para cada banco, como por exemplo: layout, geração de 
 		   código de barras e geração de linha digitável.  
@@ -19,18 +19,18 @@ Notas....: Os método da classe pai podem ser especializados na classe filho se h
 #define CRLF chr(13) + chr(10)
 
 
-user function tcBco637()
+user function tcBco2637()
 return .t.
 
 
-/*/{Protheus.doc} tcBco637
-Classe principal da classe tcBco637
+/*/{Protheus.doc} tcBco2637
+Classe principal da classe tcBco2637
 @author William Campana
 @since 12/11/2018
 @version 1.0
 @type class
 /*/
-	class tcBco637 from tcBoleto
+	class tcBco2637 from tcBoleto
 		data cClassName as string hidden
 		data cBcoCor    as string hidden
 
@@ -51,24 +51,24 @@ Classe principal da classe tcBco637
 	endClass
 
 
-/*/{Protheus.doc} tcBco637:New
-Método construtor da classe tcBco637
+/*/{Protheus.doc} tcBco2637:New
+Método construtor da classe tcBco2637
 @author William Campana
 @since 12/11/2018
 @version 1.0                        
 @type constructor
 @example
-local oBoleto := tcBco637():New()
+local oBoleto := tcBco2637():New()
 /*/
-method New() class tcBco637
+method New() class tcBco2637
 	_Super:New()
 
-	::cClassName := "tcBco637"
+	::cClassName := "tcBco2637"
 	::cBcoCor	 := ''
 return
 
 
- /*/{Protheus.doc} tcBco637:ClassName
+ /*/{Protheus.doc} tcBco2637:ClassName
 	Método responsável por retornar o nome da classe
 	@author William Campana
 	@since 12/11/2018
@@ -76,7 +76,7 @@ return
 	@type method
 	@return caractere, retorna o nome da classe
 /*/
-method ClassName() class tcBco637
+method ClassName() class tcBco2637
 return ::cClassName
 
 
@@ -87,12 +87,12 @@ return ::cClassName
 	@version 1.0
 	@type method
 /*/  
-method Destroy(oObj as object) class tcBco637
+method Destroy(oObj as object) class tcBco2637
 	freeObj(oObj)
 return
 
 
- /*/{Protheus.doc} tcBco637:SetCorrespondente
+ /*/{Protheus.doc} tcBco2637:SetCorrespondente
 	Método para informar qual o banco correspondente
 	@author William Campana
 	@since 01/02/2018
@@ -100,19 +100,19 @@ return
 	@type method
 	@param cBcoCor, caracter, Número do banco correspondente
 /*/  
-method SetCorrespondente(cBcoCor) class tcBco637
+method SetCorrespondente(cBcoCor) class tcBco2637
 	::cBcoCor := cBcoCor
 return
 
 
- /*/{Protheus.doc} tcBco637:GetCorrespondente
+ /*/{Protheus.doc} tcBco2637:GetCorrespondente
 	Método para retornar qual o banco correspondente
 	@author William Campana
 	@since 01/02/2018
 	@version 1.0
 	@type method
 /*/  
-method GetCorrespondente() class tcBco637
+method GetCorrespondente() class tcBco2637
 return(::cBcoCor)
 
 
@@ -174,7 +174,7 @@ Conteúdo do Vetor de dados (aData)
 [44] CNPJ do Beneficiario
 [45] Numero da Parcela
 /*/
-method AddBy(rowId_SE1) class tcBco637
+method AddBy(rowId_SE1) class tcBco2637
 	local nRowId_SEE   := 0
 	local cNNumPre     := ''
 	local cNNum        := ''
@@ -193,9 +193,22 @@ method AddBy(rowId_SE1) class tcBco637
 
 	_Super:AddBy(rowId_SE1)			//Executa o método da classe pai populando os dados padrões
 
+	//Se a classe pai não carregou o título (SEE/SE1/SA1 não encontrados) não há o que especializar
+	if _Super:HasErrors()
+		return
+	endIf
+
 	nRowId_SEE := _Super:GetRowId()		//Obtém o Recno da tabela SEE
 	aData      := _Super:GetArray()		//Obtém conteúdo carregado pela classe pai
 	nRowArray  := _Super:GetRowArray()	//Obtém o número da linha no array aData
+
+	if empty(aData) .or. nRowArray == 0
+		_Super:Add('AddBy' ;
+			, 'Dados do boleto não carregados!' ;
+			, 'E' ;
+			, 'Não foi possível carregar os dados do título com ID <' + cValToChar(rowId_SE1) + '>. (tcBco2637)')
+		return
+	endIf
 
 	// Banco Sofisa - Calcular tudo como se fosse Santander.
 
@@ -203,6 +216,10 @@ method AddBy(rowId_SE1) class tcBco637
 	SEE->(dbGoTo(nRowId_SEE))
 
 	if SEE->(eof())
+		_Super:Add('AddBy' ;
+			, 'Parâmetro de Banco/Agência/Conta/Sub-Conta não encontrado!' ;
+			, 'E' ;
+			, 'O registro <' + cValToChar(nRowId_SEE) + '> da tabela SEE não foi encontrado. (tcBco2637)')
 		return
 	endIf
 
@@ -225,10 +242,10 @@ method AddBy(rowId_SE1) class tcBco637
 	*/
 
 	//Composição para nosso número e campo livre
-	cNumAge   := strZero(val(aData[1, 6]), 4) 
-	cNumCC    := strZero(val(aData[1, 9]), 9)
-	cNumCCDig := strZero(val(aData[1, 9]), 1) 
-	cNumCart  := strZero(val(aData[1, 22]), 3)	//Carteira
+	cNumAge   := strZero(val(aData[nRowArray, 6]), 4) 
+	cNumCC    := strZero(val(aData[nRowArray, 9]), 9)
+	cNumCCDig := strZero(val(aData[nRowArray, 9]), 1) 
+	cNumCart  := strZero(val(aData[nRowArray, 22]), 3)	//Carteira
 
 	//Preparação do nosso número
 	cNNum    := alltrim(aData[nRowArray, 10])
@@ -279,6 +296,17 @@ method AddBy(rowId_SE1) class tcBco637
 	aData[nRowArray, 35] := 'HYDRONORTH S/A - 01.618.551/0001-86'
 	//TÉRMINO dos tratamentos especializados para o Banco
 
+
+	//O nosso número precisa caber no campo do título, senão é truncado ao gravar
+	if len(allTrim(aData[nRowArray, 10])) > len(SE1->E1_NUMBCO)
+		_Super:Add('AddBy' ;
+			, 'Tamanho do campo E1_NUMBCO insuficiente!' ;
+			, 'E' ;
+			, 'O Nosso Número <' + allTrim(aData[nRowArray, 10]) + '> possui <' ;
+			+ cValToChar(len(allTrim(aData[nRowArray, 10]))) + '> posições e o campo E1_NUMBCO possui <' ;
+			+ cValToChar(len(SE1->E1_NUMBCO)) + '>. Ajuste o tamanho do campo no dicionário de dados.')
+		return
+	endIf
 	_Super:SetArray(aData)			//Devolve conteúdo especializado para a classe pai
 return
 
@@ -297,7 +325,7 @@ Método para calcular o digito verificador baseado em módulo 11
 @example
 CalcMod11(cCode, 2, 9, '')
 /
-method CalcMod11(cCode, nInitFactor, nLimitFactor, cChrCode) class tcBco637
+method CalcMod11(cCode, nInitFactor, nLimitFactor, cChrCode) class tcBco2637
 	local nAccum   := 0
 	local nResto   := 0
 	local nPosicao := 0
@@ -364,8 +392,8 @@ Posição  Tamanho  Formato    Conteúdo
 06 a 09  04       9(04)      Fator de Vencimento **
 10 a 19  10       9(08)V(2)  Valor
 /
-method CreateBarCode(cFree) class tcBco637
-	local cFatorVcto := strZero((aData[nRowArray, 18] - cToD('07/10/1997')), 4)
+method CreateBarCode(cFree) class tcBco2637
+	local cFatorVcto := _Super:FatorVencimento(aData[nRowArray, 18])
 	local cCodBco    := strZero(val(aData[nRowArray, 1]), 3)
 	local cValor     := strZero((aData[nRowArray, 21] * 100), 10)
 	local cBarCode   := cCodBco + '9' + cFatorVcto + cValor + cFree
@@ -388,7 +416,7 @@ Método para geração da linha digitável
 @example
 cLinhaDigitavel := CreateLine(cBarCode)
 /
-method CreateLine(cBarCode) class tcBco637
+method CreateLine(cBarCode) class tcBco2637
 	cDigitLine := ""
 	cCodeCut   := ""
 

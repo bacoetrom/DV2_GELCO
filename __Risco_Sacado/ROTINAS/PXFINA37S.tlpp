@@ -28,7 +28,7 @@ Parâmetros:
 
 /*/{Protheus.doc} PXRSChaveOrigem
 Monta a chave de rastreio do título a receber posicionado (gravada em E2_XORIRS).
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @return character, E1_FILIAL + E1_PREFIXO + E1_NUM + E1_PARCELA + E1_TIPO
@@ -38,7 +38,7 @@ Return SE1->(E1_FILIAL + E1_PREFIXO + E1_NUM + E1_PARCELA + E1_TIPO)
 
 /*/{Protheus.doc} PXRSDescSituacao
 Retorna a descrição da situação de risco sacado.
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cRisco, character, conteúdo de E1_XRISCO
@@ -65,7 +65,7 @@ Return cDesc
 Retorna o fornecedor/loja configurado no banco (A6_XFORN/A6_XLOJA).
 Como E1_XBANCO guarda apenas o código do banco, é usada a primeira
 agência/conta do banco que possua o fornecedor preenchido.
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cFilTit, character, filial do título (para o xFilial da SA6)
@@ -97,7 +97,7 @@ Return aRet
 
 /*/{Protheus.doc} PXRSBuscaPagar
 Localiza o título a pagar gerado pelo risco sacado a partir da chave de origem.
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cFilTit, character, filial do título a receber
@@ -132,7 +132,7 @@ Return nRecno
 /*/{Protheus.doc} PXRSValidaGeracao
 Pré-validação da geração do título a pagar (executada no MODELPOS do FINM010,
 antes da gravação da baixa, para evitar falhas dentro da transação).
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param nRecSE1, numeric, R_E_C_N_O_ do título a receber
@@ -179,7 +179,7 @@ Return cMsg
 Gera o título a pagar (SE2) como cópia do título a receber, alterando apenas
 fornecedor/loja (SA6 do E1_XBANCO) e natureza (MV_XRSNAT).
 Executado dentro da transação da baixa (MODELCOMMITTTS do FINM010): não usa interface.
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param nRecSE1, numeric, R_E_C_N_O_ do título a receber
@@ -263,7 +263,7 @@ Return cMsg
 
 /*/{Protheus.doc} PXRSValidaEstorno
 Valida se o título a pagar gerado pode ser excluído no cancelamento da baixa.
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cFilTit, character, filial do título a receber
@@ -295,7 +295,7 @@ Return cMsg
 /*/{Protheus.doc} PXRSExcluiPagar
 Exclui o título a pagar gerado pelo risco sacado (cancelamento da baixa do receber).
 Executado dentro da transação: não usa interface.
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param nRecSE2, numeric, R_E_C_N_O_ do título a pagar

@@ -172,115 +172,130 @@ method AddBy(rowId_SE1) class tcBco001
 	local nRowId_SEE := 0
 	local aData      := {}
 	local nRowArray  := 0
-	local cNNumPre   := ''
+	local nTamNumBco := 0
+	local cConvenio  := ''
+	local cCarteira  := ''
 	local cNNum      := ''
-	local cNNumDig   := ''
-	local cNNumComp  := ''
+	local cFree      := ''
 	local cLinDigit  := ''
 	local cCodBarra  := ''
-	local cNumAge    := ''
-	local cNumCC     := ''
-	local cTpCart    := ''
-	local cFree      := ''
 	local cLinhaSE1  := ''
-	
+
 	_Super:AddBy(rowId_SE1)			//Executa o método da classe pai populando os dados padrões
+
+	//Se a classe pai não carregou o título (SEE/SE1/SA1 não encontrados) não há o que especializar
+	if _Super:HasErrors()
+		return
+	endIf
 
 	nRowId_SEE := _Super:GetRowId()		//Obtém o Recno da tabela SEE
 	aData      := _Super:GetArray()		//Obtém conteúdo carregado pela classe pai
 	nRowArray  := _Super:GetRowArray()	//Obtém o número da linha no array aData
 
+	if empty(aData) .or. nRowArray == 0
+		_Super:Add('AddBy' ;
+			, 'Dados do boleto não carregados!' ;
+			, 'E' ;
+			, 'Não foi possível carregar os dados do título com ID <' + cValToChar(rowId_SE1) + '>. (tcBco001)')
+		return
+	endIf
+
 	dbSelectArea('SEE')
 	SEE->(dbGoTo(nRowId_SEE))
-	
+
 	if SEE->(eof())
+		_Super:Add('AddBy' ;
+			, 'Parâmetro de Banco/Agência/Conta/Sub-Conta não encontrado!' ;
+			, 'E' ;
+			, 'O registro <' + cValToChar(nRowId_SEE) + '> da tabela SEE não foi encontrado. (tcBco001)')
 		return
 	endIf
 
 	//INÍCIO dos tratamentos especializados para o Banco
 	/*
-	Composição do campo livre
-	=========================
+	Composição do campo livre - Convênio de 7 posições
+	==================================================
 	Posição  Tamanho  Formato    Conteúdo
-	-------  -------  ---------  --------				
-    20 a 30  11       9(11)      Convênio(4) + Nosso Número(7), sem DV
-    31 a 34  04       9(4)       Número da Agência de Relacionamento, sem DV
-    35 a 42  08       9(8)       Conta Corrente de Relacionamento, sem DV
-    43 a 44  02       9(2)       Tipo de Carteira/Modalidade de Cobrança
+	-------  -------  ---------  --------
+	20 a 25  06       9(6)       Zeros
+	26 a 42  17       9(17)      Nosso Número: Convênio(7) + Sequencial(10), sem DV
+	43 a 44  02       9(2)       Carteira
 	*/
-	
-	//Composição para nosso número e campo livre
-	cNumAge := strZero(val(aData[1, 6]), 4) 
-	cNumCC  := strZero(val(aData[1, 8]), 8) 
-	cTpCart := strZero(val(aData[1, 41]), 2) 
-		
-	//Preparação do nosso número	
-	If alltrim(aData[nRowArray, 1]) == "001" //Victor Ramon
-		cNNum    := alltrim(aData[nRowArray, 10])
-		cNrNs    := alltrim(aData[nRowArray, 10])		
-		cNNumDig := subStr(cNNum, len(cNNum), 1)
-		//cNNum    := subStr(cNNum, 1, (len(cNNum) - 1))	
-	Else
-		cNNum    := alltrim(aData[nRowArray, 10])
-		cNNumDig := subStr(cNNum, len(cNNum), 1)
-		cNNum    := subStr(cNNum, 1, (len(cNNum) - 1))
-	EndIf
-		
-	if empty(cNNum)		//Se ainda não foi gerado nosso número - primeira impressão do boleto
-		//Obtem o úmero do convênio BANCO DO BRASIL
-		If alltrim(aData[nRowArray, 1]) == "001" //Victor Ramon
-			cNNumPre := strZero(val(subStr(aData[nRowArray, 40], 1, 7)), 7)
-		Else
-			cNNumPre := strZero(val(subStr(aData[nRowArray, 40], 1, 4)), 4)
-		EndIf
-	
-		//Obtem o próximo número e grava na faixa (SEE) com a quantidade de dígitos informado
-		If alltrim(aData[nRowArray, 1]) == "001" //Victor Ramon
-			cNNum := cNNumPre + "000" +_Super:NextNossoNumero(7) 
-		Else
-			cNNum := cNNumPre + _Super:NextNossoNumero(7) 
-		EndIf
 
-		//Calculo do dígito verificador do nosso número
-		cNNumDig := _Super:CalcMod11(cNNum, 2, 9, 'X')
+	nTamNumBco := len(SE1->E1_NUMBCO)	//SE1 posicionado pela classe pai
+
+	//Convênio (EE_CODEMP) e carteira (EE_CODCART; se vazio, EE_TIPCART)
+	cConvenio := strZero(val(subStr(allTrim(aData[nRowArray, 40]), 1, 7)), 7)
+	cCarteira := allTrim(aData[nRowArray, 22])
+
+	if empty(cCarteira)
+		cCarteira := allTrim(aData[nRowArray, 41])
 	endIf
 
-	//Geração da composição para impressão
-	cNNumComp := cNNum //+ '-' + cNNumDig  
+	cCarteira := strZero(val(cCarteira), 2)
 
-	If empty(cNrNs)// Primeira passada ainda não tem nosso numero gravado na SE1 por isso pego após gerar
-		cNrNs := cNNum //+ cNNumDig 
-	EndIf
+	//Nosso número já gravado no título (reimpressão)
+	cNNum := allTrim(aData[nRowArray, 10])
+
+	if len(cNNum) == 18		//Gravado anteriormente com DV - convênio de 7 posições não possui DV
+		cNNum := subStr(cNNum, 1, 17)
+	endIf
+
+	if !empty(cNNum) .and. len(cNNum) <> 17
+		_Super:Add('AddBy' ;
+			, 'Nosso Número inválido!' ;
+			, 'E' ;
+			, 'O Nosso Número <' + cNNum + '> gravado no título com ID <' + cValToChar(rowId_SE1) ;
+			+ '> não possui 17 dígitos (Convênio + Sequencial). Verifique o campo E1_NUMBCO.')
+		return
+	endIf
+
+	if empty(cNNum)		//Primeira impressão do boleto - gera o nosso número
+		if nTamNumBco < 17
+			_Super:Add('AddBy' ;
+				, 'Tamanho do campo E1_NUMBCO insuficiente!' ;
+				, 'E' ;
+				, 'O Nosso Número do Banco do Brasil (convênio de 7 posições) possui 17 dígitos ' ;
+				+ 'e o campo E1_NUMBCO possui <' + cValToChar(nTamNumBco) + '> posições. ' ;
+				+ 'Ajuste o tamanho do campo no dicionário de dados.')
+			return
+		endIf
+
+		if empty(val(cConvenio))
+			_Super:Add('AddBy' ;
+				, 'Convênio não informado!' ;
+				, 'E' ;
+				, 'O código do convênio (EE_CODEMP) não foi informado no parâmetro de banco ' ;
+				+ 'com ID <' + cValToChar(nRowId_SEE) + '>. (SEE)')
+			return
+		endIf
+
+		//Obtem o próximo número e grava na faixa (SEE)
+		cNNum := cConvenio + '000' + _Super:NextNossoNumero(7)
+
+		if _Super:HasErrors()
+			return
+		endIf
+	endIf
 
 	//Preparação do campo livre
-	If alltrim(aData[nRowArray, 1]) == "001" //Victor Ramon
-	   cFree := "000000" + cNrNs + cTpCart   
-	  //cFree := "000000" + cNNum + cNumAge + cNumCC + cTpCart    
-	Else
-	   cFree := cNNum + cNumAge + cNumCC + cTpCart   
-	EndIf	
+	cFree := '000000' + cNNum + cCarteira
 
 	//Preparação do código de barras e linha digitável
 	cCodBarra := _Super:CreateBarCode(cFree)		//Montagem do código de barras
-    if alltrim(aData[nRowArray, 1]) == "001" //Victor Ramon
-	    //cCodbr    := SUBSTR( cCodBarra,1,42) + "17" + SUBSTR( cCodBarra,45,5)
-		cLinDigit := _Super:CreateLine(cCodBarra)		//Montagem da linha digitável	
-	else
-	    cLinDigit := _Super:CreateLine(cCodBarra)		//Montagem da linha digitável	
-	endIf	
-	
-	
-	cLinhaSE1 := StrTran(cLinDigit,'.','')
-	cLinhaSE1 := StrTran(cLinhaSE1,' ','')
+	cLinDigit := _Super:CreateLine(cCodBarra)		//Montagem da linha digitável
 
-	//Grava especializações no array aData para retorno 	
+	cLinhaSE1 := strTran(cLinDigit, '.', '')
+	cLinhaSE1 := strTran(cLinhaSE1, ' ', '')
+
+	//Grava especializações no array aData para retorno
 	aData[nRowArray,  1] += '-9'
-	aData[nRowArray, 10] := cNNum + cNNumDig
+	aData[nRowArray, 10] := cNNum
 	aData[nRowArray, 32] := cLinDigit
 	aData[nRowArray, 33] := cCodBarra
-	aData[nRowArray, 34] := cNNumComp
+	aData[nRowArray, 34] := cNNum
 	aData[nRowArray, 49] := cLinhaSE1
 	//TÉRMINO dos tratamentos especializados para o Banco
-	
+
 	_Super:SetArray(aData)			//Devolve conteúdo especializado para a classe pai
 return

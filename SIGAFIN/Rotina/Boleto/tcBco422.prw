@@ -193,14 +193,31 @@ method AddBy(rowId_SE1) class tcBco422
 	
 	_Super:AddBy(rowId_SE1)			    //Executa o método da classe pai populando os dados padrões
 
+	//Se a classe pai não carregou o título (SEE/SE1/SA1 não encontrados) não há o que especializar
+	if _Super:HasErrors()
+		return
+	endIf
+
 	nRowId_SEE := _Super:GetRowId()		//Obtém o Recno da tabela SEE
 	aData      := _Super:GetArray()		//Obtém conteúdo carregado pela classe pai
 	nRowArray  := _Super:GetRowArray()	//Obtém o número da linha no array aData
+
+	if empty(aData) .or. nRowArray == 0
+		_Super:Add('AddBy' ;
+			, 'Dados do boleto não carregados!' ;
+			, 'E' ;
+			, 'Não foi possível carregar os dados do título com ID <' + cValToChar(rowId_SE1) + '>. (tcBco422)')
+		return
+	endIf
 
 	dbSelectArea('SEE')
 	SEE->(dbGoTo(nRowId_SEE))
 	
 	if SEE->(eof())
+		_Super:Add('AddBy' ;
+			, 'Parâmetro de Banco/Agência/Conta/Sub-Conta não encontrado!' ;
+			, 'E' ;
+			, 'O registro <' + cValToChar(nRowId_SEE) + '> da tabela SEE não foi encontrado. (tcBco422)')
 		return
 	endIf
 
@@ -222,8 +239,8 @@ method AddBy(rowId_SE1) class tcBco422
 //        aData[nRowArray, 12] += ' - '  + aData[nRowArray, 44]	
 	
 		//Composição para nosso número e campo livre
-		cNumAge := strZero(val(aData[1, 6]), 4) 
-		cNumCC  := strZero(val(aData[1, 8]), 7) 
+		cNumAge := strZero(val(aData[nRowArray, 6]), 4) 
+		cNumCC  := strZero(val(aData[nRowArray, 8]), 7) 
 			
 		//Preparação do nosso número	
 		cNNum    := alltrim(aData[nRowArray, 10])
@@ -252,21 +269,21 @@ method AddBy(rowId_SE1) class tcBco422
 		aData[nRowArray, 12] := aData[nRowArray, 2]
 		aData[nRowArray,  1] := '237-2'
 		aData[nRowArray,  2] := 'BANCO BRADESCO SA'
-		aData[nRowArray,  3] := 'system\tcImage\banco237.jpg'
+		aData[nRowArray,  3] := ::GetLogo('237')
 		aData[nRowArray,  5] := '237'
 		
-		aInfBco    := aData[1, 14]
+		aInfBco    := aData[nRowArray, 14]
 		//aInfBco[1] := 'ATÉ O VENCIMENTO, PREFERENCIALMENTE NO BANCO BRADESCO SA' 	
 		//aInfBco[2] := 'APÓS O VENCIMENTO, SOMENTE NO BANCO BRADESCO SA'
     	aInfBco[1] := 'DEPOSITO BANCÁRIO NÃO EFETUA QUITAÇÃO DO BOLETO'
 	    aInfBco[2] := 'PROTESTAR NO 6º DIA ÚTIL APÓS O VENCIMENTO'
 	    aInfBco[3] := ''
-	    aInfBco[4] := 'JUROS AO DIA DE R$ ' + transform((aData[1, 21] * 0.0026666), '@E 999,999.99')
+	    aInfBco[4] := 'JUROS AO DIA DE R$ ' + transform((aData[nRowArray, 21] * 0.0026666), '@E 999,999.99')
 	    aInfBco[5] := ''
 	    aInfBco[6] := ''
 	    aInfBco[7] := ''	    
 		
-		aData[1, 14] := aInfBco
+		aData[nRowArray, 14] := aInfBco
 	else		//Padrão Safra
 		/*
 		Composição do campo livre
@@ -316,15 +333,15 @@ method AddBy(rowId_SE1) class tcBco422
 		   
 		aData[nRowArray,  1] += '-7'
 		
-		aInfBco      := aData[1, 14]
+		aInfBco      := aData[nRowArray, 14]
 		aInfBco[1]   := 'PROTESTAR NO 6º DIA ÚTIL APÓS O VENCIMENTO'
 		aInfBco[2]   := ''
 		aInfBco[3]   := 'ESTE BOLETO REPRESENTA DUPLICATA CEDIDA FIDUCIARIAMENTE AO BANCO SAFRA S/A, '
 		aInfBco[4]   := 'FICANDO VEDADO O PAGAMENTO DE QUALQUER OUTRA FORMA QUE NÃO ATRAVÉS DO PRESENTE BOLETO.'
 		aInfBco[5]   := ''
-		aInfBco[6]   := 'JUROS AO DIA DE R$ ' + transform((aData[1, 21] * 0.0026666), '@E 999,999.99')
+		aInfBco[6]   := 'JUROS AO DIA DE R$ ' + transform((aData[nRowArray, 21] * 0.0026666), '@E 999,999.99')
 		ainfBco[7]   := '' 
-		aData[1, 14] := aInfBco
+		aData[nRowArray, 14] := aInfBco
 	endIf
 	
 	//Preparação do código de barras e linha digitável
@@ -338,5 +355,16 @@ method AddBy(rowId_SE1) class tcBco422
 	aData[nRowArray, 34] := cNNumComp
 	//TÉRMINO dos tratamentos especializados para o Banco
 	
+
+	//O nosso número precisa caber no campo do título, senão é truncado ao gravar
+	if len(allTrim(aData[nRowArray, 10])) > len(SE1->E1_NUMBCO)
+		_Super:Add('AddBy' ;
+			, 'Tamanho do campo E1_NUMBCO insuficiente!' ;
+			, 'E' ;
+			, 'O Nosso Número <' + allTrim(aData[nRowArray, 10]) + '> possui <' ;
+			+ cValToChar(len(allTrim(aData[nRowArray, 10]))) + '> posições e o campo E1_NUMBCO possui <' ;
+			+ cValToChar(len(SE1->E1_NUMBCO)) + '>. Ajuste o tamanho do campo no dicionário de dados.')
+		return
+	endIf
 	_Super:SetArray(aData)			//Devolve conteúdo especializado para a classe pai
 return

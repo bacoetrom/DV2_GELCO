@@ -127,6 +127,8 @@ Classe principal da classe tcBoleto
 		method CalcMod10(cCode)
 		method CalcMod11(cCode, nInitFactor, nLimitFactor, cChrCode)
 		method CreateBarCode(cDigCode)
+		method FatorVencimento(dVencto)
+		method GetLogo(cCodBco)
 		method CreateLine(cBarCode)
 		method Generate()
 		method Printer()
@@ -513,8 +515,7 @@ method AddBy(rowId_SE1) class tcBoleto
 	aAdd(::aData ;
 		, {allTrim(SEE->EE_CODIGO) ;		            			//[ 1] Código do banco
 	, SA6->A6_NOME ;    			            			//[ 2] Nome do banco
-	, 'system\tcImage\banco' ;                              //[ 3] Endereço do logo do banco
-	+ allTrim(SEE->EE_CODIGO) + '.jpg' ;
+	, ::GetLogo(SEE->EE_CODIGO) ;                             //[ 3] Endereço do logo do banco
 		, 'PAGÁVEL EM QUALQUER BANCO' ;						//[ 4] Local de pagamento
 	, SEE->EE_CODIGO ;				                    	//[ 5] Código Febraban
 	, SEE->EE_AGENCIA ;				                        //[ 6] Número da agência
@@ -803,7 +804,7 @@ Posição  Tamanho  Formato    Conteúdo
 10 a 19  10       9(08)V(2)  Valor
 /*/
 method CreateBarCode(cFree) class tcBoleto
-	local cFatorVcto := strZero((::aData[::nPointer, 18] - cToD('07/10/1997')), 4)
+	local cFatorVcto := ::FatorVencimento(::aData[::nPointer, 18])
 	local cCodBco    := strZero(val(::aData[::nPointer, 1]), 3)
 	local cValor     := strZero((::aData[::nPointer, 21] * 100), 10)
 	local cBarCode   := cCodBco + '9' + cFatorVcto + cValor + cFree
@@ -813,6 +814,52 @@ method CreateBarCode(cFree) class tcBoleto
 		+ ::CalcMod11(cBarCode, 2, 9, 'DAC-BarCode') ;
 		+ subStr(cBarCode, 5, 44)
 return(cBarCode)
+
+
+/*/{Protheus.doc} tcBoleto:FatorVencimento
+Método para calcular o fator de vencimento do código de barras (posições 06 a 09)
+@author Pablo Regis
+@since 19/10/2026
+@version 1.0
+@type method
+@param  dVencto, data    , Data de vencimento do título
+@return cFator , caracter, Fator de vencimento com 4 dígitos
+@example
+cFator := oBoleto:FatorVencimento(SE1->E1_VENCTO)
+@obs
+Regra FEBRABAN: o fator é a quantidade de dias desde 07/10/1997. Ao atingir 9999 (21/02/2025)
+o fator reinicia em 1000 (22/02/2025), repetindo o ciclo a cada 9000 dias.
+/*/
+method FatorVencimento(dVencto) class tcBoleto
+	local nFator := dVencto - sToD('19971007')
+
+	do while nFator > 9999
+		nFator -= 9000
+	endDo
+return(strZero(nFator, 4))
+
+
+/*/{Protheus.doc} tcBoleto:GetLogo
+Método para retornar o caminho do logo do banco no servidor
+@author Pablo Regis
+@since 19/10/2026
+@version 1.0
+@type method
+@param  cCodBco, caracter, Código do banco (ex.: '001')
+@return cLogo  , caracter, Caminho do arquivo a partir do RootPath (\system\tcImage\banco\bancoXXX.jpg)
+@example
+cLogo := oBoleto:GetLogo('001')
+/*/
+method GetLogo(cCodBco) class tcBoleto
+	local cLogo := '\system\tcImage\banco\banco' + allTrim(cCodBco) + '.jpg'
+
+	if !file(cLogo)
+		_Super:Add('GetLogo' ;
+			, 'Logo do banco não encontrado!' ;
+			, 'A' ;
+			, 'O arquivo <' + cLogo + '> não foi encontrado no servidor. O boleto será impresso sem o logo.')
+	endIf
+return(cLogo)
 
 
 /*/{Protheus.doc} tcBoleto:CreateLine

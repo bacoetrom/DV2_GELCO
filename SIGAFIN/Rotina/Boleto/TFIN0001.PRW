@@ -199,7 +199,7 @@ user function TFin0001(cDevice, aParam)
 	//oBrowse:AddButton('Incluir Mensagem E-Mail'     , {|| onMsgMail()},, 6,)
 	//oBrowse:addButton('Imprimir Duplicata Mercantil', {|| onPrintDup()},, 6,)
 
-	//onFilter()				//Setando filtro padrão do browser
+	onFilter()				//Setando filtro padrão do browser e carregando os títulos (aData)
 
 	setKey(VK_F7, {|| onRecords()})
 
@@ -841,12 +841,20 @@ Carga das classes especializadas de bancos
 @since 25/01/2018
 @version 1.0
 @type function
+@param numBco , caracter, Código do banco (EE_CODIGO)
+@param cSubCta, caracter, Subconta do parâmetro de banco (EE_SUBCTA) - define o layout do banco 637
+@return oBoleto, objeto, Classe especializada do banco ou nil se não houver classe para o banco/subconta
 
 @history 15/07/2022, william.campana, adicionado chamada para banco 084 (uniprime)
+@history 19/10/2026, Pablo Regis, banco 637 separado em tcBco1637 (Santander) e tcBco2637 (Itaú) pela subconta
 /*/
 //-------------------------------------------------------------------
-static function classLoad(numBco)
+static function classLoad(numBco, cSubCta)
 	local oBoleto := nil
+
+	default cSubCta := ''
+
+	cSubCta := allTrim(cSubCta)
 
 	numBco := allTrim(numBco)
 
@@ -872,8 +880,12 @@ static function classLoad(numBco)
 		//Classe derivada do tcBoleto() para especialização do banco do Safra
 		oBoleto := tcBco422():New()
 	elseIf numBco == '637'
-		//Classe derivada do tcBoleto() para especialização do banco Sofisa
-		oBoleto := tcBco637():new()
+		//Classe derivada do tcBoleto() para especialização do banco Sofisa - layout definido pela subconta
+		if cSubCta == '001'
+			oBoleto := tcBco1637():new()		//Layout Santander
+		elseIf cSubCta == '002'
+			oBoleto := tcBco2637():new()		//Layout Itaú
+		endIf
 	elseIf numBco == '756'
 		//Classe derivada do tcBoleto() para especialização do banco Sicoob
 		oBoleto := tcBco756():new()
@@ -895,6 +907,7 @@ static function onGenerate(recno_SEE)
 	local isBcoInf  := .f.
 	local oHelper   := tcAlerts():New()
 	local rowid_SEE := nil
+	Local nRow      := 0
 
 	default recno_SEE := 0
 
@@ -963,8 +976,18 @@ static function onGenerate(recno_SEE)
 				endIf
 
 				if !oHelper:HasErrors()
-					oBoleto := classLoad(SEE->EE_CODIGO)
+					oBoleto := classLoad(SEE->EE_CODIGO, SEE->EE_SUBCTA)
 
+					if oBoleto == nil
+						oHelper:Add('onGenerate' ;
+							, 'Banco sem layout de boleto!' ;
+							, 'E' ;
+							, 'Não existe classe de boleto para o banco <' + allTrim(SEE->EE_CODIGO) ;
+							+ '> e subconta <' + allTrim(SEE->EE_SUBCTA) + '>. Verifique o cadastro de parâmetros de banco (SEE).')
+					endIf
+				endIf
+
+				if !oHelper:HasErrors()
 					oBoleto:SetAssign(.t.)		//Indica se o nosso número será gravado no título e incrementado na faixa
 
 					oBoleto:Empty()
@@ -972,7 +995,10 @@ static function onGenerate(recno_SEE)
 
 					if !oBoleto:HasErrors()
 						oBoleto:AddBy(SE1->(recno()))
-						oBoleto:Generate()
+
+						if !oBoleto:HasErrors()
+							oBoleto:Generate()
+						endIf
 					endIf
 
 					oHelper:AddFrom(oBoleto)
@@ -1060,6 +1086,14 @@ static function doPrinter(cDevice, recno_SEE)
 		endIf
 	endIf
 
+	if aScan(aData, {|x| x[2]}) == 0
+		oAlerts:Add('doPrinter' ;
+			, 'Nenhum título selecionado!' ;
+			, 'E' ;
+			, 'Nenhum título foi marcado para impressão. Utilize o botão "Filtrar" para carregar ' ;
+			+ 'os títulos e marque os boletos desejados.')
+	endIf
+
 	if !oAlerts:HasErrors()
 		dbSelectArea('SE1')
 
@@ -1089,31 +1123,34 @@ static function doPrinter(cDevice, recno_SEE)
 					endIf
 				endIf
 
-				if !oHelper:HasErrors()
-					if (!isJob)
-						if !existDir('C:\totvs')
-							if makeDir('C:\totvs') <> 0
-								oHelper:Add('doPrinter' ;
-									, 'Diretório não pode ser criado!' ;
-									, 'E' ;
-									, 'O diretório "C:\totvs" não pode ser criado.')
-							endIf
-						endIf
-					endIf
+				if !oHelper:HasErrors() ;
+						.and. !existDir(_cDirBase)
 
-					if !existDir(_cDirBase)
-						if makeDir(_cDirBase) <> 0
-							oHelper:Add('doPrinter' ;
-								, 'Diretório não pode ser criado!' ;
-								, 'E' ;
-								, 'O diretório "' + _cDirBase + '" não pode ser criado.')
-						endIf
+					if !createDir(_cDirBase)
+						//Sem acesso ao disco local (ex.: SmartClient HTML/WebApp ou sem permissão): usa a pasta temporária
+						oHelper:Add('doPrinter' ;
+							, 'Diretório não pode ser criado!' ;
+							, 'A' ;
+							, 'O diretório "' + _cDirBase + '" não pode ser criado. ' ;
+							+ 'Os boletos serão gerados na pasta temporária "' + getTempPath() + '".')
+
+						_cDirBase := getTempPath()
 					endIf
 				endIf
 
 				if !oHelper:HasErrors()
-					oBoleto := classLoad(SEE->EE_CODIGO)
+					oBoleto := classLoad(SEE->EE_CODIGO, SEE->EE_SUBCTA)
 
+					if oBoleto == nil
+						oHelper:Add('doPrinter' ;
+							, 'Banco sem layout de boleto!' ;
+							, 'E' ;
+							, 'Não existe classe de boleto para o banco <' + allTrim(SEE->EE_CODIGO) ;
+							+ '> e subconta <' + allTrim(SEE->EE_SUBCTA) + '>. Verifique o cadastro de parâmetros de banco (SEE).')
+					endIf
+				endIf
+
+				if !oHelper:HasErrors()
 					oBoleto:SetPath(_cDirBase)	        //Indica o caminho para geração dos arquivos
 					oBoleto:SetOutput(cDevice)			//Indica o dispositivo de saída ['File', 'Screen', 'Printer']
 					oBoleto:SetAssign(.t.)				//Indica se o nosso número será gravado no título e incrementado na faixa
@@ -1123,12 +1160,15 @@ static function doPrinter(cDevice, recno_SEE)
 
 					if !oBoleto:HasErrors()
 						oBoleto:AddBy(SE1->(recno()))
-						oBoleto:Printer()
 
-						aAdd(aFiles ;
-							, {SE1->E1_CLIENTE ;			//Código do cliente
-						, SE1->E1_LOJA ;			//Loja do cliente
-						, oBoleto:GetFileName()})   //Nome do PDF gerado com o boleto
+						if !oBoleto:HasErrors()		//Não imprime boleto sem nosso número/código de barras
+							oBoleto:Printer()
+
+							aAdd(aFiles ;
+								, {SE1->E1_CLIENTE ;			//Código do cliente
+								, SE1->E1_LOJA ;			//Loja do cliente
+								, oBoleto:GetFileName()})   //Nome do PDF gerado com o boleto
+						endIf
 					endIf
 
 					oHelper:AddFrom(oBoleto)
@@ -1157,6 +1197,44 @@ static function doPrinter(cDevice, recno_SEE)
 		oBrowse:SetFilterDefault(cFilter)
 	endIf
 return
+
+
+//-------------------------------------------------------------------
+/*/{Protheus.doc} createDir
+Cria o diretório informado, nível a nível
+@author Pablo Regis
+@since 19/10/2026
+@version 1.0
+@type function
+@param cPath, caracter, Caminho a ser criado (ex.: 'c:\totvs\boleto\' ou '\spool\boleto\')
+@return lOk, lógico, Indica se o diretório existe ao final do processo
+/*/
+//-------------------------------------------------------------------
+static function createDir(cPath)
+	local aLevels := strTokArr(allTrim(cPath), '\')
+	local cDir    := ''
+	local nLevel  := 0
+	local lOk     := .t.
+
+	if left(allTrim(cPath), 1) == '\'		//Caminho a partir do RootPath do servidor
+		cDir := '\'
+	endIf
+
+	for nLevel := 1 to len(aLevels)
+		cDir += aLevels[nLevel]
+
+		if lOk ;
+				.and. right(cDir, 1) <> ':' ;		//Unidade de disco (ex.: C:) não é criada
+				.and. !existDir(cDir)
+
+			makeDir(cDir)
+			lOk := existDir(cDir)
+		endIf
+
+		cDir += '\'
+	next nLevel
+
+return(lOk)
 
 
 //-------------------------------------------------------------------

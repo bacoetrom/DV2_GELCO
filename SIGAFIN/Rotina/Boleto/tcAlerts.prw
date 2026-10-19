@@ -5,7 +5,7 @@ Descrição: Classe para tratamento de mensagens de alerta nos programas
 ******************************************************************************************************/
 
 #include "totvs.ch"
-#include "Color.ch"
+#include "colors.ch"
 
 #define CRLF chr(13) + chr(10)
                                                       

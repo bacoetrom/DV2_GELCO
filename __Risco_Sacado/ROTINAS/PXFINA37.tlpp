@@ -55,7 +55,7 @@ Parâmetros (ParamBox - última seleção salva por usuário, sem dependência de SX1)
   10 Lote de / 11 Lote até / 12 Situação (1=Sem risco;2=Enviado;3=Não pago;4=Pago;5=Todos em risco) /
   13 Banco do risco sacado (SA6)
 
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @return logical, .T. quando a tela foi aberta
@@ -72,7 +72,7 @@ Return MontaTela(aPar)
 /*/{Protheus.doc} Parametros
 Exibe a tela de parâmetros (ParamBox) e devolve as respostas.
 A situação (combo) é normalizada para numérico.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @return array, respostas na ordem das constantes PAR_* ou vazio quando cancelado
@@ -110,7 +110,7 @@ Return aRet
 
 /*/{Protheus.doc} OpcaoCombo
 Converte o retorno do combo do ParamBox ("n-Descrição" ou posição numérica) em número.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param xOpcao, variant, retorno do combo
@@ -128,7 +128,7 @@ Return nOpcao
 
 /*/{Protheus.doc} MontaTela
 Cria a tabela temporária, carrega os títulos e exibe o FWMarkBrowse.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param aPar, array, respostas dos parâmetros (ParamBox)
@@ -187,7 +187,7 @@ Return .T.
 
 /*/{Protheus.doc} CriaTemporaria
 Cria a tabela temporária do browse (FWTemporaryTable).
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @return object, instância de FWTemporaryTable já criada
@@ -226,7 +226,7 @@ Return oTmp
 
 /*/{Protheus.doc} CarregaTitulos
 Seleciona os títulos a receber conforme os parâmetros e grava na tabela temporária.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cAlias, character, alias da tabela temporária
@@ -342,7 +342,7 @@ Return nQtd
 
 /*/{Protheus.doc} DefineColunas
 Monta as colunas do FWMarkBrowse.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cAlias, character, alias da tabela temporária
@@ -384,7 +384,7 @@ Return aColunas
 
 /*/{Protheus.doc} MarcaTodos
 Marca, desmarca ou inverte a seleção de todos os registros do browse.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param oMark, object, FWMarkBrowse
@@ -418,7 +418,7 @@ Return .T.
 
 /*/{Protheus.doc} ColetaMarcados
 Retorna os títulos marcados no browse.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param oMark, object, FWMarkBrowse
@@ -442,7 +442,7 @@ Return aSel
 
 /*/{Protheus.doc} AcaoRiscoSacado
 Ação "Risco Sacado": envia os títulos marcados ao banco, gerando um lote por filial.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param oMark, object, FWMarkBrowse
@@ -512,7 +512,7 @@ Return .T.
 
 /*/{Protheus.doc} ProcessaLote
 Gera o lote de risco sacado de uma filial e marca os títulos.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cFilTit, character, filial dos títulos
@@ -558,7 +558,7 @@ Return nOk > 0
 
 /*/{Protheus.doc} ProximoLote
 Obtém o próximo código de lote (6 dígitos) garantindo que não exista na filial.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cFilTit, character, filial dos títulos
@@ -576,7 +576,7 @@ Return cLote
 
 /*/{Protheus.doc} LoteExiste
 Verifica se o código de lote já foi usado na filial.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cFilTit, character, filial
@@ -607,7 +607,7 @@ Return ValType(xQtd) == "N" .And. xQtd > 0
 Altera a situação de risco sacado dos títulos marcados.
   RS_NAO_PAGO / RS_PAGO : a partir de "Enviado ao Banco".
   RS_ENVIADO (estorno)  : a partir de "Não pago" ou "Pago", sem baixa após o envio e sem SE2 gerado.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param oMark, object, FWMarkBrowse
@@ -668,7 +668,7 @@ Return .T.
 
 /*/{Protheus.doc} ValidaSituacao
 Valida a mudança de situação do título posicionado na SE1.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param aOrigem, array, situações de origem permitidas
@@ -695,7 +695,7 @@ Return cMotivo
 /*/{Protheus.doc} AcaoExcluirLote
 Exclui os lotes dos títulos marcados, devolvendo todos os títulos do lote para "sem risco".
 Permitido somente se nenhum título do lote tiver baixa após o envio ou SE2 gerado.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param oMark, object, FWMarkBrowse
@@ -774,7 +774,7 @@ Return .T.
 
 /*/{Protheus.doc} TitulosDoLote
 Retorna os R_E_C_N_O_ de todos os títulos de um lote.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param cFilTit, character, filial
@@ -811,7 +811,7 @@ Return aRecnos
 
 /*/{Protheus.doc} Recarrega
 Recarrega a tabela temporária após uma ação e atualiza o browse.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param oMark, object, FWMarkBrowse
@@ -836,7 +836,7 @@ Return .T.
 
 /*/{Protheus.doc} ChaveTitulo
 Identificação do título posicionado na SE1 para mensagens.
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @return character, filial/prefixo/número/parcela/tipo
@@ -847,7 +847,7 @@ Return "Título " + AllTrim(SE1->E1_FILIAL) + "/" + AllTrim(SE1->E1_PREFIXO) + "/
 
 /*/{Protheus.doc} MostraLog
 Exibe o resumo do processamento (limitado a RS_MAX_LOG linhas; todas vão para o log do servidor).
-@type static function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @param aLog, array, mensagens

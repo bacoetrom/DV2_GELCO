@@ -182,18 +182,36 @@ method AddBy(rowId_SE1) class tcBco033
 	local cNumAge    := ''
 	local cNumCC     := ''
 	local cNumCart   := '' 
+	local cNumConv   := ''
 	local cFree      := ''
 	
 	_Super:AddBy(rowId_SE1)			//Executa o método da classe pai populando os dados padrões
+
+	//Se a classe pai não carregou o título (SEE/SE1/SA1 não encontrados) não há o que especializar
+	if _Super:HasErrors()
+		return
+	endIf
 
 	nRowId_SEE := _Super:GetRowId()		//Obtém o Recno da tabela SEE
 	aData      := _Super:GetArray()		//Obtém conteúdo carregado pela classe pai
 	nRowArray  := _Super:GetRowArray()	//Obtém o número da linha no array aData
 
+	if empty(aData) .or. nRowArray == 0
+		_Super:Add('AddBy' ;
+			, 'Dados do boleto não carregados!' ;
+			, 'E' ;
+			, 'Não foi possível carregar os dados do título com ID <' + cValToChar(rowId_SE1) + '>. (tcBco033)')
+		return
+	endIf
+
 	dbSelectArea('SEE')
 	SEE->(dbGoTo(nRowId_SEE))
 	
 	if SEE->(eof())
+		_Super:Add('AddBy' ;
+			, 'Parâmetro de Banco/Agência/Conta/Sub-Conta não encontrado!' ;
+			, 'E' ;
+			, 'O registro <' + cValToChar(nRowId_SEE) + '> da tabela SEE não foi encontrado. (tcBco033)')
 		return
 	endIf
 
@@ -211,11 +229,11 @@ method AddBy(rowId_SE1) class tcBco033
 	*/
 
 	//Composição para nosso número e campo livre
-	cNumCed  := strZero(val(aData[1, 11]), 7) 
-	cNumAge  := strZero(val(aData[1, 6]), 5) 
-	cNumCC   := strZero(val(aData[1, 8]), 9) 
-	cNumCart := strZero(val(aData[1, 22]), 3) 
-	cNumConv := strZero(val(aData[1, 40]), 7)
+	cNumCed  := strZero(val(aData[nRowArray, 11]), 7) 
+	cNumAge  := strZero(val(aData[nRowArray, 6]), 5) 
+	cNumCC   := strZero(val(aData[nRowArray, 8]), 9) 
+	cNumCart := strZero(val(aData[nRowArray, 22]), 3) 
+	cNumConv := strZero(val(aData[nRowArray, 40]), 7)
 		
 	//Preparação do nosso número	
 	cNNum    := alltrim(aData[nRowArray, 10])
@@ -253,5 +271,16 @@ method AddBy(rowId_SE1) class tcBco033
 	aData[nRowArray, 34] := cNNumComp
 	//TÉRMINO dos tratamentos especializados para o Banco
 	
+
+	//O nosso número precisa caber no campo do título, senão é truncado ao gravar
+	if len(allTrim(aData[nRowArray, 10])) > len(SE1->E1_NUMBCO)
+		_Super:Add('AddBy' ;
+			, 'Tamanho do campo E1_NUMBCO insuficiente!' ;
+			, 'E' ;
+			, 'O Nosso Número <' + allTrim(aData[nRowArray, 10]) + '> possui <' ;
+			+ cValToChar(len(allTrim(aData[nRowArray, 10]))) + '> posições e o campo E1_NUMBCO possui <' ;
+			+ cValToChar(len(SE1->E1_NUMBCO)) + '>. Ajuste o tamanho do campo no dicionário de dados.')
+		return
+	endIf
 	_Super:SetArray(aData)			//Devolve conteúdo especializado para a classe pai
 return
