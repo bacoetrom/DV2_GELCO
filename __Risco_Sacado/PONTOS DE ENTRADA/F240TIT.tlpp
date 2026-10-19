@@ -1,0 +1,81 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+
+/*/{Protheus.doc} F240TIT
+Ponto de entrada da marcação de títulos no borderô de pagamentos (FINA240/FINA241).
+Risco Sacado: título em situação 1 (Disponível) ou 2 (Antecipado) não pode entrar em borderô.
+
+Contexto (FINA240.PRX 12.1.2510):
+  - O registro corrente é o alias de trabalho do borderô (Private cAliasSE2: "SE2" ou "SE2TMP",
+    este com o campo NUM_REG = R_E_C_N_O_ da SE2). A SE2 é posicionada a partir dele.
+  - PARAMIXB (lógico) = .T. na marcação individual (Fa240Disp): a marca já foi gravada e o PE
+    deve desfazê-la ao retornar .F. Nas demais chamadas o padrão trata a marca.
+  - Mensagem somente na marcação individual, para não repetir a cada título no "marcar todos".
+
+@type user function
+@author bacoetrom
+@since 19/10/2026
+@return logical, .T. permite marcar o título, .F. não permite
+/*/
+User Function F240TIT() as logical
+    Local aArea    := GetArea() as array
+    Local aAreaSE2 := SE2->(GetArea()) as array
+    Local lRet     := .T. as logical
+    Local lUnico   := .F. as logical
+    Local cAlias   := Alias() as character
+    Local cMsg     := "" as character
+
+    If ValType(PARAMIXB) == "L"
+        lUnico := PARAMIXB
+    EndIf
+
+    If PosicionaSE2(cAlias)
+        cMsg := U_PXRSBloqueia("BORDERO")
+    EndIf
+
+    If !Empty(cMsg)
+        lRet := .F.
+        If lUnico
+            DesfazMarca(cAlias)
+            Help(,, "PXRISCOSAC",, cMsg, 1, 0)
+        EndIf
+    EndIf
+
+    RestArea(aAreaSE2)
+    RestArea(aArea)
+Return lRet
+
+/*/{Protheus.doc} PosicionaSE2
+Posiciona a SE2 no título corrente do borderô.
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param cAlias, character, alias de trabalho corrente do FINA240
+@return logical, .T. quando a SE2 está posicionada
+/*/
+Static Function PosicionaSE2(cAlias as character) as logical
+    Local lRet := .F. as logical
+
+    If cAlias == "SE2"
+        lRet := !SE2->(Eof())
+    ElseIf !Empty(cAlias) .And. (cAlias)->(FieldPos("NUM_REG")) > 0 .And. (cAlias)->NUM_REG > 0
+        SE2->(DbGoTo((cAlias)->NUM_REG))
+        lRet := !SE2->(Eof())
+    EndIf
+Return lRet
+
+/*/{Protheus.doc} DesfazMarca
+Desfaz a marca (E2_OK) do título no alias de trabalho do borderô (marcação individual).
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param cAlias, character, alias de trabalho corrente do FINA240
+@return logical, sempre .T.
+/*/
+Static Function DesfazMarca(cAlias as character) as logical
+    If !Empty(cAlias) .And. (cAlias)->(FieldPos("E2_OK")) > 0 .And. !Empty((cAlias)->E2_OK)
+        RecLock(cAlias, .F.)
+        (cAlias)->E2_OK := Space(Len((cAlias)->E2_OK))
+        (cAlias)->(MsUnlock())
+    EndIf
+Return .T.

@@ -1,0 +1,267 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+#include "fwmvcdef.ch"
+
+#define RS_OPER_BAIXA  "B"
+#define RS_OPER_ESTOR  "E"
+
+/*/{Protheus.doc} FINM020
+Ponto de entrada MVC do modelo de Baixa a Pagar (FINM020 - tabela FK2).
+Usado por todas as rotinas que gravam ou cancelam baixa a pagar (FINA080, FINA090, FINA430,
+FINA750, FINA340, FINA290...).
+
+Risco Sacado:
+  MODELPOS - bloqueia a baixa e o cancelamento/exclusão da baixa de título em situação
+             1 (Disponível) ou 2 (Antecipado) fora da rotina PXFINA37 (regra U_PXRSBloqueia).
+             A antecipação e o estorno feitos pela própria rotina são liberados (U_PXRSEmRotina).
+
+Estrutura do modelo padrão (FINM020.prw 12.1.2510): MASTER (falso) -> FKADETAIL (grid) -> FK2DETAIL (grid).
+Os dados da FK2 são lidos percorrendo as linhas da FKA (LeDadosBaixa), e não pela linha ativa.
+
+PARAMIXB:
+  [1] Object    - modelo (ou submodelo, conforme o ID)
+  [2] Character - ID do ponto de execução
+  [3] Character - ID do formulário
+
+@type user function
+@author bacoetrom
+@since 19/10/2026
+@return variant, lógico nos IDs de validação
+@obs Ver plano __Risco_Sacado/PLANO_RISCO_SACADO.md - itens VAL-001 a VAL-003.
+/*/
+User Function FINM020() as variant
+    Local aParam   := PARAMIXB as variant
+    Local xRet     := .T. as variant
+    Local cIdPonto := "" as character
+    Local oModel   as object
+    Local oErro    as object
+    Local jDados   as json
+
+    If ValType(aParam) <> "A" .Or. Len(aParam) < 2
+        Return xRet
+    EndIf
+
+    oModel   := aParam[1]
+    cIdPonto := aParam[2]
+
+    If cIdPonto <> "MODELPOS"
+        Return xRet
+    EndIf
+
+    Try
+        jDados := LeDadosBaixa(oModel)
+
+        If U_PXRSLogAtivo()
+            LogDiagnostico(oModel, jDados)
+        EndIf
+
+        xRet := ValidaModelo(oModel, jDados)
+    Catch oErro
+        // Erro inesperado: bloqueia a operação com a mensagem (não segue para o commit)
+        U_PXRSLog("ERROR", "FINM020/MODELPOS: " + oErro:Description)
+        oModel:SetErrorMessage("FK2DETAIL", "", "FK2DETAIL", "", "PXRISCOSAC", ;
+                               "Risco Sacado: " + oErro:Description, "Verifique o dicionário/cadastros do risco sacado e repita.")
+        xRet := .F.
+    EndTry
+Return xRet
+
+/*/{Protheus.doc} ValidaModelo
+Validação total do modelo da baixa a pagar (MODELPOS).
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param oModel, object, modelo FINM020
+@param jDados, json, dados da baixa lidos por LeDadosBaixa
+@return logical, .F. bloqueia a baixa/cancelamento
+/*/
+Static Function ValidaModelo(oModel as object, jDados as json) as logical
+    Local aAreaSE2 := SE2->(GetArea()) as array
+    Local lRet     := .T. as logical
+    Local cOper    := "" as character
+    Local cMsg     := "" as character
+
+    cOper := jDados["oper"]
+    If Empty(cOper) .Or. !PosicionaTitulo(jDados["iddoc"])
+        RestArea(aAreaSE2)
+        Return lRet
+    EndIf
+
+    If cOper == RS_OPER_BAIXA
+        cMsg := U_PXRSBloqueia("BAIXA")
+    Else
+        cMsg := U_PXRSBloqueia("ESTORNO")
+    EndIf
+
+    If !Empty(cMsg)
+        lRet := .F.
+        oModel:SetErrorMessage("FK2DETAIL", "", "FK2DETAIL", "", "PXRISCOSAC", cMsg, ;
+                               "Use a rotina Risco Sacado (PXFINA37) para movimentar este título.")
+    EndIf
+
+    RestArea(aAreaSE2)
+Return lRet
+
+/*/{Protheus.doc} LeDadosBaixa
+Lê uma única vez os dados da baixa no modelo.
+O FK2DETAIL é grid filha do FKADETAIL: a linha ativa pode ser de um movimento sem FK2 (FK5)
+ou de um estorno (ES) recém-incluído. As linhas da FKA são percorridas até achar o registro
+principal da baixa (FK2_TPDOC VL/BA) e o posicionamento das grids é restaurado ao final.
+Operação: INSERT = baixa; DELETE ou UPDATE com MASTER/E5_OPERACAO preenchido = estorno.
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param oModel, object, modelo FINM020
+@return json, {oper, tpdoc, motbx, iddoc, valor}; oper vazio quando a operação não é tratada
+/*/
+Static Function LeDadosBaixa(oModel as object) as json
+    Local jDados    := JsonObject():New() as json
+    Local lAchou    := .F. as logical
+    Local cTpDoc    := "" as character
+    Local nOper     := 0 as numeric
+    Local nOperSE5  := 0 as numeric
+    Local nLinFKA   := 0 as numeric
+    Local nLinFK2   := 0 as numeric
+    Local nI        := 0 as numeric
+    Local nJ        := 0 as numeric
+    Local xOperSE5  as variant
+    Local oFKA      as object
+    Local oFK2      as object
+
+    jDados["oper"]  := ""
+    jDados["tpdoc"] := ""
+    jDados["motbx"] := ""
+    jDados["iddoc"] := ""
+    jDados["valor"] := 0
+
+    nOper    := oModel:GetOperation()
+    xOperSE5 := oModel:GetValue("MASTER", "E5_OPERACAO")
+    If ValType(xOperSE5) == "N"
+        nOperSE5 := xOperSE5
+    EndIf
+
+    oFKA    := oModel:GetModel("FKADETAIL")
+    oFK2    := oModel:GetModel("FK2DETAIL")
+    nLinFKA := oFKA:GetLine()
+    nLinFK2 := oFK2:GetLine()
+
+    nI := 1
+    While !lAchou .And. nI <= oFKA:Length()
+        oFKA:GoLine(nI)
+        If !oFKA:IsDeleted() .And. !oFK2:IsEmpty()
+            nJ := 1
+            While !lAchou .And. nJ <= oFK2:Length()
+                oFK2:GoLine(nJ)
+                cTpDoc := AllTrim(oFK2:GetValue("FK2_TPDOC"))
+                If !oFK2:IsDeleted() .And. (cTpDoc == "VL" .Or. cTpDoc == "BA")
+                    lAchou          := .T.
+                    jDados["tpdoc"] := cTpDoc
+                    jDados["motbx"] := AllTrim(oFK2:GetValue("FK2_MOTBX"))
+                    jDados["iddoc"] := oFK2:GetValue("FK2_IDDOC")
+                    jDados["valor"] := oFK2:GetValue("FK2_VALOR")
+                EndIf
+                nJ++
+            EndDo
+        EndIf
+        nI++
+    EndDo
+
+    // Restaura o posicionamento usado pelo padrão (FKA primeiro, depois a filha FK2)
+    If nLinFKA > 0 .And. nLinFKA <= oFKA:Length()
+        oFKA:GoLine(nLinFKA)
+    EndIf
+    If nLinFK2 > 0 .And. nLinFK2 <= oFK2:Length()
+        oFK2:GoLine(nLinFK2)
+    EndIf
+
+    If lAchou
+        If nOper == MODEL_OPERATION_DELETE .Or. (nOper == MODEL_OPERATION_UPDATE .And. nOperSE5 > 0)
+            jDados["oper"] := RS_OPER_ESTOR
+        ElseIf nOper == MODEL_OPERATION_INSERT
+            jDados["oper"] := RS_OPER_BAIXA
+        EndIf
+    EndIf
+Return jDados
+
+/*/{Protheus.doc} PosicionaTitulo
+Posiciona a SE2 no título da baixa a partir do FK2_IDDOC -> FK7.
+Se a SE2 já estiver posicionada no título correto, mantém o posicionamento.
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param cIdDoc, character, FK2_IDDOC do registro principal da baixa
+@return logical, .T. quando o título foi localizado
+/*/
+Static Function PosicionaTitulo(cIdDoc as character) as logical
+    Local lRet       := .F. as logical
+    Local cQuery     := "" as character
+    Local cAliasQry  := "" as character
+    Local cChave     := "" as character
+    Local oStatement as object
+
+    If Empty(cIdDoc)
+        Return lRet
+    EndIf
+
+    cQuery := "SELECT FK7.FK7_PREFIX, FK7.FK7_NUM, FK7.FK7_PARCEL, FK7.FK7_TIPO, FK7.FK7_CLIFOR, FK7.FK7_LOJA "
+    cQuery += "  FROM " + RetSqlName("FK7") + " FK7 "
+    cQuery += " WHERE FK7.D_E_L_E_T_ = ? "
+    cQuery += "   AND FK7.FK7_FILIAL = ? "
+    cQuery += "   AND FK7.FK7_IDDOC = ? "
+    cQuery += "   AND FK7.FK7_ALIAS = ? "
+
+    oStatement := FWExecStatement():New(ChangeQuery(cQuery))
+    oStatement:SetString(1, " ")
+    oStatement:SetString(2, xFilial("FK7"))
+    oStatement:SetString(3, cIdDoc)
+    oStatement:SetString(4, "SE2")
+    cAliasQry := oStatement:OpenAlias(GetNextAlias())
+
+    If !(cAliasQry)->(Eof())
+        // Ordem 1 da SE2: E2_FILIAL+E2_PREFIXO+E2_NUM+E2_PARCELA+E2_TIPO+E2_FORNECE+E2_LOJA
+        cChave := (cAliasQry)->(FK7_PREFIX + FK7_NUM + FK7_PARCEL + FK7_TIPO + FK7_CLIFOR + FK7_LOJA)
+        If !SE2->(Eof()) .And. SE2->(E2_PREFIXO + E2_NUM + E2_PARCELA + E2_TIPO + E2_FORNECE + E2_LOJA) == cChave
+            lRet := .T.
+        Else
+            SE2->(DbSetOrder(1))
+            lRet := SE2->(DbSeek(xFilial("SE2") + cChave))
+        EndIf
+    EndIf
+
+    (cAliasQry)->(DbCloseArea())
+    oStatement:Destroy()
+    oStatement := Nil
+Return lRet
+
+/*/{Protheus.doc} LogDiagnostico
+Registra no log os dados recebidos pelo ponto de entrada (MV_XRSLOG = .T.).
+Usado para as validações VAL-001 a VAL-003 do plano.
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param oModel, object, modelo FINM020
+@param jDados, json, dados da baixa lidos por LeDadosBaixa
+@return logical, sempre .T.
+/*/
+Static Function LogDiagnostico(oModel as object, jDados as json) as logical
+    Local cMsg := "" as character
+
+    cMsg := "FINM020 DIAG | ID=MODELPOS"
+    cMsg += " | FunName=" + FunName()
+    cMsg += " | Oper=" + cValToChar(oModel:GetOperation())
+    cMsg += " | E5_OPERACAO=" + cValToChar(oModel:GetValue("MASTER", "E5_OPERACAO"))
+    cMsg += " | Linhas FKA=" + cValToChar(oModel:GetModel("FKADETAIL"):Length())
+    cMsg += " | RS_OPER=" + jDados["oper"]
+    cMsg += " | FK2_TPDOC=" + jDados["tpdoc"]
+    cMsg += " | FK2_MOTBX=" + jDados["motbx"]
+    cMsg += " | FK2_VALOR=" + cValToChar(jDados["valor"])
+    cMsg += " | FK2_IDDOC=" + AllTrim(jDados["iddoc"])
+    cMsg += " | EmRotina=" + cValToChar(U_PXRSEmRotina())
+    If !SE2->(Eof())
+        cMsg += " | SE2=" + SE2->(E2_FILIAL + E2_PREFIXO + E2_NUM + E2_PARCELA + E2_TIPO + E2_FORNECE + E2_LOJA)
+        cMsg += " | E2_SALDO=" + cValToChar(SE2->E2_SALDO)
+        If SE2->(FieldPos("E2_XSTRIC")) > 0
+            cMsg += " | E2_XSTRIC=" + SE2->E2_XSTRIC
+        EndIf
+    EndIf
+    U_PXRSLog("INFO", cMsg)
+Return .T.

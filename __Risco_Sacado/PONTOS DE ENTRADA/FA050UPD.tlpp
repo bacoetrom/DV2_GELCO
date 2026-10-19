@@ -1,0 +1,42 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+
+/*/{Protheus.doc} FA050UPD
+Ponto de entrada de pré-validação do FINA050 (inclusão, alteração e exclusão), executado antes
+da tela e fora da transação de gravação (FINA050.PRX 12.1.2510: FA050Inclu, FA050Alter e FA050Delet).
+Risco Sacado:
+  - Alteração/exclusão de título em situação 1 (Disponível) ou 2 (Antecipado): bloqueada.
+  - Alteração/exclusão do título a pagar do banco gerado pela antecipação (E2_XORIRS): bloqueada.
+A rotina PXFINA37 (antecipação/estorno via ExecAuto) é liberada pela regra U_PXRSBloqueia.
+A inclusão não é tratada (SE2 não está posicionado no título incluído).
+
+PARAMIXB: não recebe parâmetros. SE2 posicionado no título.
+Em rotina automática, o Help() é registrado no log do ExecAuto (lMsHelpAuto).
+
+@type user function
+@author bacoetrom
+@since 19/10/2026
+@return logical, .T. permite a operação, .F. bloqueia
+/*/
+User Function FA050UPD() as logical
+    Local aArea := GetArea() as array
+    Local lRet  := .T. as logical
+    Local cOper := "" as character
+    Local cMsg  := "" as character
+
+    If FwIsInCallStack("FA050DELET")
+        cOper := "EXCLUSAO"
+    ElseIf FwIsInCallStack("FA050ALTER")
+        cOper := "ALTERACAO"
+    EndIf
+
+    If !Empty(cOper)
+        cMsg := U_PXRSBloqueia(cOper)
+        If !Empty(cMsg)
+            lRet := .F.
+            Help(,, "PXRISCOSAC",, cMsg, 1, 0)
+        EndIf
+    EndIf
+
+    RestArea(aArea)
+Return lRet

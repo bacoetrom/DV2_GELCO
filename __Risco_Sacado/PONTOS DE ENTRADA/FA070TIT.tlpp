@@ -12,7 +12,7 @@ Barreira antecipada; a regra também é garantida no PE MVC FINM010 (MODELPOS) par
 
 PARAMIXB: não recebe parâmetros. SE1 posicionado no título em baixa.
 
-@type user function
+@type function
 @author bacoetrom
 @since 13/10/2026
 @return logical, .T. permite a baixa, .F. bloqueia

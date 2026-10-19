@@ -1,134 +1,230 @@
 ---
-goal: Risco Sacado — envio de títulos a receber ao banco e geração de título a pagar ao banco na baixa dos não pagos
-version: 2.1
+goal: Risco Sacado em Contas a Pagar — disponibilizar títulos de fornecedores ao banco; na antecipação, baixar o título do fornecedor e gerar o título a pagar ao banco
+version: 3.2
 date_created: 2026-10-13
-last_updated: 2026-10-13
+last_updated: 2026-10-19
 status: 'In progress'
-tags: [feature, SIGAFIN, SE1, SE2, SA6, FWMarkBrowse, FINM010, ExecAuto, TReport]
+tags: [feature, SIGAFIN, SE2, SA6, FK2, FWMarkBrowse, FINM020, FINA080, FINA050, ExecAuto, TReport]
 ---
 
-# Plano — Risco Sacado
+# Plano — Risco Sacado (Contas a Pagar)
 
 ## Introdução
 
-Os títulos a receber (SE1) são marcados como **Risco Sacado** e enviados a um banco (SA6) em **lotes** (código sequencial de 6 dígitos, um lote por filial). O plano também controla a situação informada no retorno do banco.
+O risco sacado (*confirming*) passa a ser feito no **Contas a Pagar (SE2)**. A empresa (sacada) envia ao banco, em **lotes**, os títulos que deve aos fornecedores. O banco oferece a antecipação ao fornecedor, que pode aceitar ou não:
 
-- **Não pago ao Banco:** na baixa normal (`NOR`) que liquida o SE1, o sistema gera automaticamente um título a pagar (SE2). Ele é cópia do SE1 para o fornecedor do banco (`A6_XFORN`/`A6_XLOJA`), com a natureza do parâmetro `MV_XRSNAT`.
-- **Pago ao Banco:** o usuário baixa o SE1 manualmente, sem gerar SE2.
-- **Enviado ao Banco:** o título fica com a baixa bloqueada até alguém informar o retorno do banco.
+```text
+Disponível ──► Antecipado ──► baixa o SE2 do fornecedor + gera SE2 para o banco (A6_XFORN)
+           └─► Em aberto  ──► o título volta ao fluxo normal do Contas a Pagar
+```
+
+- **Disponível (`1`):** o título foi enviado ao banco e aguarda a decisão do fornecedor. **Só a rotina de Risco Sacado pode movimentá-lo.**
+- **Antecipado (`2`):** o fornecedor antecipou com o banco. A rotina baixa o título do fornecedor, com um motivo que não movimenta banco, e gera um título a pagar para o banco, com o mesmo valor e vencimento. O título original fica protegido: **só a rotina pode estornar**.
+- **Em aberto (`3`):** o fornecedor não antecipou. O título segue em aberto, sem restrição: baixa, borderô, alteração etc. funcionam normalmente.
+
+> **Substitui a v2.1** (risco sacado no Contas a Receber/SE1). A seção 9 lista o que muda.
 
 ## 1. Arquivos
 
-| Arquivo | Conteúdo |
-|---|---|
-| `ROTINAS/PXFINA37.tlpp` | Tela: ParamBox + FWTemporaryTable + FWMarkBrowse. Ações: Marcar/Desmarcar/Inverter, Risco Sacado, Não Pago ao Banco, Pago ao Banco, Estornar Situação, Excluir Lote |
-| `ROTINAS/PXFINA37S.tlpp` | Serviços compartilhados: fornecedor do banco, validação, geração/exclusão do SE2 (ExecAuto FINA050), log |
-| `PONTOS DE ENTRADA/FINM010.tlpp` | PE MVC da baixa a receber. `MODELPOS`: bloqueios e pré-validações. `MODELCOMMITTTS`: gera/exclui o SE2; se falhar, chama `DisarmTransaction()` |
-| `PONTOS DE ENTRADA/FA070TIT.tlpp` | Barreira antecipada no FINA070 (manual e ExecAuto) para o status `1` |
-| `RELATORIOS/PXFINR25.tlpp` | TReport dos lotes (parâmetros via ParamBox), com totais por lote |
-| `DICIONARIO.md` | Especificação de campos, índices, parâmetros (SX6) e menu (sem SX1: filtros via ParamBox) |
+| Arquivo | Conteúdo | Situação |
+|---|---|---|
+| `ROTINAS/PXFINA37.tlpp` | Tela: ParamBox + FWTemporaryTable + FWMarkBrowse sobre **SE2**. Ações: Marcar/Desmarcar/Inverter, Disponibilizar (gera lote), Antecipado, Em aberto, Estornar Situação, Excluir Lote | 🔄 Reescrever (SE1 → SE2) |
+| `ROTINAS/PXFINA37S.tlpp` | Serviços: fornecedor do banco, validações, baixa do SE2 do fornecedor (ExecAuto `FINA080`), geração/exclusão do SE2 do banco (ExecAuto `FINA050`), estorno, regra de bloqueio `U_PXRSBloqueia`, log | 🔄 Reescrever |
+| `PONTOS DE ENTRADA/FINM020.tlpp` | PE MVC da **baixa a pagar** (FK2). `MODELPOS`: bloqueia baixa e cancelamento de títulos `1`/`2` fora da rotina (cobre FINA080, FINA090, FINA430, FINA340, FINA290 etc.) | 🆕 Novo |
+| `PONTOS DE ENTRADA/FA080TIT.tlpp` | Barreira antecipada na baixa manual/ExecAuto do FINA080 (status `1`/`2`) | 🆕 Novo |
+| `PONTOS DE ENTRADA/FA050UPD.tlpp` | Pré-validação (antes da tela, fora da transação) que bloqueia a alteração e a exclusão do título `1`/`2` e do SE2 do banco fora da rotina. Substitui `FA050ALT`/`FA050DEL`: o `FA050DEL` roda dentro da transação de exclusão, e `Help()` ali violaria a CA1002 | 🆕 Novo |
+| `PONTOS DE ENTRADA/F240TIT.tlpp` | Impede que um título `1`/`2` entre em borderô de pagamento (FINA240/FINA241) | 🆕 Novo |
+| `PONTOS DE ENTRADA/FINM010.tlpp` | PE da baixa a receber | ❌ Remover do projeto e do RPO |
+| `PONTOS DE ENTRADA/FA070TIT.tlpp` | Barreira da baixa a receber | ❌ Remover do projeto e do RPO |
+| `RELATORIOS/PXFINR25.tlpp` | TReport dos lotes sobre SE2, com totais por lote e situação, e o SE2 do banco gerado | 🔄 Ajustar |
+| `DICIONARIO.md` | Campos `E2_X*`, índices, parâmetros (SX6), motivo de baixa e menu | 🔄 Reescrever |
 
 ## 2. Requisitos
 
 | ID | Requisito | Implementação |
 |---|---|---|
-| REQ-001 | Filtros: Filial de/até, Vencimento real de/até, Portador/Agência/Conta, Borderô de/até, Lote de/até, Situação e Banco do risco | `PXFINA37` – `CarregaTitulos` |
-| REQ-002 | Marcar Todos, Desmarcar Todos e Inverter (também com clique no cabeçalho) | `MarcaTodos` |
-| REQ-003 | Risco Sacado: um lote por filial (`GetSXENum("SE1","E1_XLOTRS")`), grava `E1_XLOTRS`, `E1_XBANCO`, `E1_XRISCO='S'`, `E1_XDTRISC`, `E1_XSTRIC='1'` | `AcaoRiscoSacado`/`ProcessaLote` |
-| REQ-004 | Não Pago ao Banco: 1 → 2 | `AcaoSituacao` |
-| REQ-005 | Pago ao Banco: 1 → 3 (baixa manual depois) | `AcaoSituacao` |
-| REQ-006 | Estornar Situação: 2/3 → 1, só se não houver baixa após o envio nem SE2 gerado | `AcaoSituacao`/`ValidaSituacao` |
-| REQ-007 | Na baixa `NOR` que zera o saldo, com status `2`, gerar SE2 pelo valor total (`E1_VALOR`), cópia do SE1, mudando só fornecedor/loja e natureza | `FINM010` `MODELCOMMITTTS` → `U_PXRSGeraPagar` |
-| REQ-008 | Cancelamento da baixa com status `2`: excluir o SE2 se estiver aberto; bloquear se já foi baixado ou está em borderô | `FINM010` `MODELPOS`/`MODELCOMMITTTS` |
-| REQ-009 | Natureza do SE2 vem do parâmetro `MV_XRSNAT` | `U_PXRSGeraPagar` |
-| REQ-010 | Bloquear a baixa (de qualquer origem) com status `1` | `FINM010` `MODELPOS` + `FA070TIT` |
-| REQ-011 | Falha ao gerar o SE2 desfaz a baixa | Pré-validação no `MODELPOS` + `DisarmTransaction()` no commit |
-| REQ-012 | Ações de situação por seleção individual ou por lote (filtro Lote de/até + Marcar Todos) | `PXFINA37` |
-| REQ-013 | Excluir Lote: devolve todos os títulos para "sem risco", só sem baixa após o envio e sem SE2 | `AcaoExcluirLote` |
-| REQ-014 | Relatório do lote com totais | `PXFINR25` |
+| REQ-001 | Filtros: Filial de/até, Vencimento real de/até, Fornecedor/Loja de/até, Natureza de/até, Lote de/até, Situação e Banco do risco | `PXFINA37` – `CarregaTitulos` |
+| REQ-002 | Marcar Todos, Desmarcar Todos e Inverter (também com clique no cabeçalho) | `MarcaTodos` (sem alteração) |
+| REQ-003 | **Disponibilizar**: um lote por filial (`GetSXENum("SE2","E2_XLOTRS")`), grava `E2_XLOTRS`, `E2_XBANCO`, `E2_XRISCO='S'`, `E2_XDTRISC`, `E2_XSTRIC='1'`. Só para títulos elegíveis (REQ-004) | `AcaoDisponibilizar`/`ProcessaLote` |
+| REQ-004 | Elegível: `E2_SALDO = E2_VALOR` (sem baixa parcial), fora de borderô (`E2_NUMBOR` vazio), sem liberação pendente, tipo diferente de `PA`, `NDF`, `PR`, abatimentos (`-` na 3ª posição) e impostos (`TX`, `ISS`, `INS`), e fornecedor diferente do fornecedor do banco | `ValidaElegivel` |
+| REQ-005 | **Antecipado** (1 → 2), por título e numa única transação: (a) baixa total do SE2 do fornecedor com o motivo `MV_XRSMOT` (não movimenta banco); (b) inclusão do SE2 do banco; (c) grava `E2_XSTRIC='2'` e `E2_XDTANT`. Se qualquer passo falhar, `DisarmTransaction()` desfaz o título inteiro e o processamento segue para o próximo | `AcaoAntecipado` → `U_PXRSAntecipa` |
+| REQ-006 | SE2 do banco: fornecedor `A6_XFORN`/`A6_XLOJA`, prefixo `MV_XRSPRF`, número = lote + sequência (`ProximoNumero`, sob `LockByName` do lote), tipo `MV_XRSTIP`, natureza `MV_XRSNAT`, emissão = data da antecipação, vencimento = `E2_VENCTO`/`E2_VENCREA` do original, valor = **valor líquido efetivamente baixado** do original (`E2_SALDO` antes da baixa menos as retenções geradas na baixa, lidas do `FK2_VALOR`/SE5 da baixa; ver RISK-001), histórico com fornecedor/título de origem, `E2_XORIRS` = chave do original e entidades contábeis copiadas | `U_PXRSGeraPagarBanco` |
+| REQ-007 | **Em aberto** (1 → 3): só muda a situação. A partir daí o título não tem restrição | `AcaoSituacao` |
+| REQ-008 | **Estornar Situação**: 3 → 1, só sem baixa e fora de borderô desde o envio. 2 → 1 só se o SE2 do banco estiver sem baixa e fora de borderô: exclui o SE2 do banco (`FINA050` 5) e cancela a baixa do fornecedor (`FINA080` 5) na mesma transação | `AcaoEstorno` → `U_PXRSEstornaAntecipacao` |
+| REQ-009 | **Excluir Lote**: devolve para "sem risco" os títulos do lote, só se nenhum estiver `2` (Antecipado) ou com movimento após o envio | `AcaoExcluirLote` |
+| REQ-010 | **Bloqueio fora da rotina**, para títulos com `E2_XRISCO='S'` e `E2_XSTRIC` `1` ou `2`: baixa (todas as origens), cancelamento/exclusão da baixa, borderô, alteração e exclusão | PEs da seção 3 + `U_PXRSBloqueia` |
+| REQ-011 | **Proteção do SE2 do banco** (`E2_XORIRS` preenchido): exclusão e alteração bloqueadas fora da rotina. Baixa, borderô e CNAB do SE2 do banco ficam **liberados** (é o pagamento ao banco) | `FA050UPD` |
+| REQ-012 | Os PEs liberam os ExecAuto da própria rotina por `U_PXRSEmRotina()` = `FwIsInCallStack("U_PXRSANTECIPA")` ou `FwIsInCallStack("U_PXRSESTORNAANTECIPACAO")`, sem variável Private | `PXFINA37S` |
+| REQ-013 | Ações por seleção individual ou por lote (filtro Lote de/até + Marcar Todos) | `PXFINA37` |
+| REQ-014 | Relatório do lote com totais por situação e o título do banco gerado | `PXFINR25` |
 
-### Domínio `E1_XSTRIC`
+### Domínio `E2_XSTRIC`
 
-| Valor | Significado | Efeito na baixa do SE1 |
+| Valor | Significado | Baixa / borderô / alteração / exclusão fora da rotina |
 |---|---|---|
-| `1` | Enviado ao Banco | **Baixa bloqueada** |
-| `2` | Não pago ao Banco | **Gera SE2** na baixa `NOR` que zera o saldo |
-| `3` | Pago ao Banco | Nenhum (baixa manual) |
+| `1` | Disponível | **Bloqueado** |
+| `2` | Antecipado | **Bloqueado** (o original já está baixado; cancelar a baixa ou excluir também é bloqueado) |
+| `3` | Em aberto | Liberado (fluxo normal) |
 
 ```text
-(sem risco) --Risco Sacado--> 1 --Não Pago ao Banco--> 2 --baixa NOR total--> gera SE2
-                              1 --Pago ao Banco------> 3 --baixa manual-----> sem SE2
-                         2 / 3 --Estornar Situação--> 1   (sem baixa após envio / sem SE2)
-            lote inteiro --Excluir Lote--> (sem risco)    (sem baixa após envio / sem SE2)
+(sem risco) --Disponibilizar--> 1 --Antecipado--> 2   (baixa SE2 fornecedor + gera SE2 banco)
+                                1 --Em aberto---> 3   (fluxo normal)
+                           3 --Estornar--> 1          (sem baixa/borderô após o envio)
+                           2 --Estornar--> 1          (SE2 do banco sem baixa/borderô: exclui SE2 banco + cancela baixa)
+       lote --Excluir Lote--> (sem risco)             (nenhum título 2 e sem movimento após o envio)
 ```
+
+### Pontos de bloqueio (REQ-010)
+
+| Movimento | Rotina padrão | Barreira |
+|---|---|---|
+| Baixa manual | FINA080 / FINA750 | `FA080TIT` + `FINM020` `MODELPOS` |
+| Baixa automática / lote | FINA090 / FINA091 | `FINM020` `MODELPOS` |
+| Retorno CNAB a pagar | FINA430 | `FINM020` `MODELPOS` |
+| Compensação a pagar | FINA340 | `FINM020` `MODELPOS` (VAL-002) |
+| Fatura a pagar | FINA290 | `FINM020` `MODELPOS` (VAL-002) |
+| Cancelamento/exclusão da baixa (status `2`) | FINA080 / FINA090 | `FINM020` `MODELPOS` (operação de estorno) |
+| Borderô de pagamento | FINA240 / FINA241 | `F240TIT` (título não entra na seleção) |
+| Alteração | FINA050 / FINA750 | `FA050UPD` (`FwIsInCallStack("FA050ALTER")`) |
+| Exclusão | FINA050 / FINA750 | `FA050UPD` (`FwIsInCallStack("FA050DELET")`) |
+
+A regra fica centralizada em `U_PXRSBloqueia(cOperacao) → cMsg`, com o SE2 posicionado. Assim todos os PEs usam a mesma decisão e a mesma mensagem: *"Título em Risco Sacado – <situação> (lote X). Movimente pela rotina PXFINA37."*
 
 ## 3. Restrições aplicadas
 
-- Arquivos em TLPP com `tlpp-core.th` + `totvs.ch`, codificação CP-1252, sem `IIF`, sem `Function` pública, sem `ConOut`. O log usa `FWLogMsg`, grupo `RISCOSACADO`.
+- Arquivos em TLPP com `tlpp-core.th` + `totvs.ch`, codificação CP-1252, sem `IIF`, sem `Function` pública e sem `ConOut`. O log usa `FWLogMsg`, grupo `RISCOSACADO`.
+- Nome do arquivo de cada PE = nome do PE, sem prefixo `U_` na declaração.
 - As queries usam `FWExecStatement` com parâmetros (bind), `D_E_L_E_T_` e filtro de filial.
-- Nenhuma interface dentro de `Begin Transaction` ou do commit do MVC. No FINM010, os erros vão para `SetErrorMessage`/`AutoGrLog`/log.
-- A marca do browse fica em `FWTemporaryTable` (`TR_OK`). O `E1_OK` não é usado.
-- Não há troca de `cFilAnt`, e o SM0 não é acessado diretamente (CA2000). O lote usa a sequência da filial logada, e a unicidade é garantida por filial com `LoteExiste`.
-- Os PEs restauram a área da SE1 (`GetArea`/`RestArea`) para não interferir na rotina padrão.
+- Nenhuma interface dentro de `Begin Transaction` ou do commit do MVC. Os erros de cada título vão para o array de log, exibido **depois** da transação. Nos PEs, os erros vão para `SetErrorMessage` (MVC), `Help` (tela) ou `AutoGrLog` (ExecAuto/`IsBlind()`).
+- `SuperGetMV` é lido **uma vez**, antes dos laços (parâmetros carregados num JSON `jCfg` no início da ação).
+- A marca do browse fica em `FWTemporaryTable` (`TR_OK`). O `E2_OK` não é usado.
+- Não há troca de `cFilAnt`. As ações processam a filial do título com `xFilial("SE2", cFilTit)`. O ExecAuto `FINA080`/`FINA050` roda na filial logada, então a tela **só permite Antecipar/Estornar títulos da filial logada** (os demais vão para o log). Disponibilizar e Em aberto, que só gravam campos `X`, continuam multi-filial.
+- Os PEs restauram a área (`GetArea`/`RestArea`) e só agem quando `E2_XRISCO = 'S'` ou `E2_XORIRS` está preenchido. Nos demais títulos, o custo é só a leitura dos campos.
+- `FWModelActive()` é salvo e restaurado em volta de cada ExecAuto aninhado.
 
-## 4. Pesquisa TDN (2026-10-13)
+## 4. Validação de símbolos (2026-10-19)
 
-| Símbolo | Situação | Uso |
+O TDN bloqueou o acesso automático (HTTP 403). Os símbolos foram validados nos **fontes padrão da release 12.1.2510** (`D:\99-FONTES\R2510-2026-Julho\...\adm`) e em PEs reais de outros projetos.
+
+| Símbolo | Evidência | Uso |
 |---|---|---|
-| PE MVC `FINM010` | ✅ Documentado: modelo da Baixa a Receber; trata só o registro principal da baixa (FK1) | Gancho central |
-| IDs `MODELPOS`, `MODELCOMMITTTS` (dentro da transação) | ✅ Documentados | Bloqueio / geração |
-| `FA070TIT` | ✅ Retorno lógico; também executa no ExecAuto (`lF070Auto`) | Barreira no FINA070 |
-| ExecAuto `FINA070` (3/5/6, `AUTMOTBX`) | ✅ | Testes |
-| ExecAuto `FINA050` (3/5) | ✅ Padrão já usado em `PxFinA32AglutinacaoImpostos.tlpp` | Geração e exclusão do SE2 |
-| `F200AVL` (CNAB) | ⚠️ Documentado, mas dispara para **todas** as ocorrências do retorno (inclusive as que não são baixa) e sem SE1 posicionado | **Não implementado**: o bloqueio no CNAB fica a cargo do `FINM010` |
-| `F110TIT` (lote) | ⚠️ A semântica do retorno é ambígua no TDN | **Não implementado**: o bloqueio no lote fica a cargo do `FINM010` |
-| `F070ACONT` | ❌ Não executa no ExecAuto | Descartado |
-| `SE5FI070` | ❌ O TDN orienta usar MVC na P12 | Descartado |
-| `F070CANCEL` | ❌ Só altera valores da tela | Descartado |
-| `FA070CAN`/`FA070CA2-4` | ❌ Página "Em construção" | Descartado |
+| PE MVC `FINM020` | ✅ `FINM020.prw`: `MPFormModel():New('FINM020')`, `MASTER → FKADETAIL → FK2DETAIL`, `E5_OPERACAO` no MASTER, `FK2_TPDOC='ES'` no estorno | Barreira central da baixa (`MODELPOS`) |
+| `FA080TIT` | ✅ `FINA080.PRX:3254`: `ExecBlock("FA080TIT")` antes do `Begin Transaction` (3411). `.F.` em ExecAuto aborta a baixa | Barreira antecipada no FINA080 |
+| `FA050UPD` | ✅ `FINA050.PRX:1008/2095/4925`: pré-validação de inclusão (`FA050Inclu`), exclusão (`FA050Delet`) e alteração (`FA050Alter`), antes da tela | Bloqueio da alteração/exclusão |
+| `FA050DEL` | ⚠️ `FINA050.PRX:2265`: executa **dentro** da transação de exclusão | **Descartado** (CA1002) |
+| `FA050ALT` | ⚠️ `FINA050.PRX:4953`: entra no `TudoOk` da alteração | Descartado: `FA050UPD` cobre antes da tela |
+| `F240TIT` | ✅ `FINA240.PRX:2145/2345/2459`: registro corrente = `cAliasSE2` (`SE2` ou `SE2TMP` com `NUM_REG`). PARAMIXB `.T.` na marcação individual (o PE desfaz a marca) | Bloqueio do borderô |
+| `FINA080(xAutoCab, nOpc, lNoMBrowse, nOpBaixa, lExibeLanc, lOnline)` | ✅ `FINA080.PRX:152`. Sem `AUTVLRPG`, baixa `E2_SALDO + VA` (linha 2033). `E2_VALLIQ := nValPgto` (5883) | Baixa (3) / cancelamento (5), `lExibeLanc = .F.` |
+| `FINA050(aRotAuto, nOpcion, nOpcAuto, bExecuta, aDadosBco, lExibeLanc)` | ✅ `FINA050.PRX:103` | Inclusão (3) / exclusão (5) do SE2 do banco |
+| `MovBcoBx(cMotBx)` / `ReadMotBx()` | ✅ `finxfin.prx:7240` | Validação do motivo `MV_XRSMOT` |
+| `FwIsInCallStack` | ✅ Usado no próprio FINA080 (`FwIsInCallStack("FINA450")`) | `U_PXRSEmRotina`, `FA050UPD` |
+| `FINM010` / `FA070TIT` | — Receber | **Removidos** |
 
 ## 5. Validações pendentes em debug (ambiente de testes 12.1.2510)
 
-Ligue `MV_XRSLOG = .T.`: o `FINM010` registra no log (`RISCOSACADO`) o ID, FunName, a operação, `FK1_TPDOC`, `FK1_MOTBX`, `FK1_VALOR`, `FK1_IDDOC`, o SE1, `E1_SALDO` e `E1_XSTRIC`.
+Ligue `MV_XRSLOG = .T.`: o `FINM020` registra no log (`RISCOSACADO`) o ID, FunName, a operação, `FK2_TPDOC`, `FK2_MOTBX`, `FK2_VALOR`, `FK2_IDDOC`, o SE2, `E2_SALDO` e `E2_XSTRIC`.
 
 | ID | Validação | Se falhar |
 |---|---|---|
-| VAL-001 | O `FINM010` (`MODELPOS`/`MODELCOMMITTTS`) dispara nas baixas por FINA070 manual, FINA070 ExecAuto, FINA110 e FINA200 | Criar PE específico na rotina (ex.: `F70GRSE1` para CNAB) |
-| VAL-002 | O cancelamento passa pelo `FINM010` com `FK1_TPDOC='ES'` ou com operação DELETE | Ajustar `OperacaoBaixa` ou usar `F070EST` |
-| VAL-003 | No `MODELCOMMITTTS`, `E1_SALDO` já está atualizado (regra "zera saldo") e `FK1_IDDOC` → FK7 localiza o título | Ajustar `ProcessaCommit`/`PosicionaTitulo` |
-| VAL-004 | O retorno `.F.` no `MODELPOS` aborta a baixa sem erro técnico em FINA110/FINA200 (qual mensagem o lote/CNAB mostra) | Avaliar PE específico |
-| VAL-005 | `DisarmTransaction()` dentro do `MODELCOMMITTTS` desfaz a baixa por inteiro | Mover a geração para validação prévia completa |
-| VAL-006 | O ExecAuto `FINA050` aninhado na baixa funciona (variáveis privadas, `FWModelActive` restaurado) | Gerar fora da transação com reprocessamento |
-| VAL-007 | Os PEs de inclusão a pagar existentes (`FA050INC`, `F050INC`, `F050GER`, `FA050FIN`...) não bloqueiam o SE2 do risco sacado | Tratar `E2_XORIRS` preenchido nesses PEs |
-| VAL-008 | O FINA050 aceita a emissão/vencimento originais (datas retroativas, `MV_DATAFIN`) | Definir regra de datas com o usuário |
+| VAL-001 | O `FINM020` (`MODELPOS`) dispara nas baixas por FINA080 (manual e ExecAuto), FINA090, FINA430 e FINA750, com `FK2_IDDOC` → FK7 localizando o SE2 | PE específico por rotina (ex.: `FA090TIT`/`F430...`) |
+| VAL-002 | O `FINM020` dispara na compensação (FINA340) e na fatura (FINA290) | PE específico (ex.: filtro `FA340FIL`) |
+| VAL-003 | O cancelamento/exclusão da baixa passa pelo `FINM020` com operação DELETE ou `FK2_TPDOC='ES'` | Ajustar `OperacaoBaixa` ou usar PE de cancelamento do FINA080 |
+| VAL-004 | O ExecAuto `FINA080` com `AUTMOTBX = MV_XRSMOT` baixa sem gerar movimento bancário (SE5 sem banco, FK5 inexistente) | Revisar a configuração do motivo de baixa |
+| VAL-005 | `U_PXRSEmRotina()` retorna `.T.` nos PEs durante os ExecAuto da rotina (nome na pilha `U_PXRSANTECIPA`) | Ajustar o nome consultado na pilha |
+| VAL-006 | `DisarmTransaction()` desfaz por inteiro a baixa + inclusão do SE2 do banco | Validar tudo antes e gravar sem erro esperado |
+| VAL-007 | `F240TIT` impede a marcação no borderô (individual, inverter e marcar todos; FINA240 e FINA241) | Filtro no `F240FIL` |
+| VAL-009 | `E2_VALLIQ` após a baixa do ExecAuto traz o líquido (com e sem PCC na baixa) | Ler o valor de FK2/SE5 da baixa |
+| VAL-010 | `ChangeQuery` converte `\|\|` (concatenação) no JOIN do `PXFINR25` para o banco em uso | Montar a chave com `CONCAT` ou ler o título do banco por função |
+| VAL-008 | Retenção na baixa (`MV_BX10925 = 1`): a antecipação gera os TX, o líquido lido da baixa bate com o SE2 do banco e o estorno exclui os TX | Ajustar a leitura do líquido / bloquear o estorno com TX movimentado (RISK-001) |
 
 ## 6. Tarefas
 
 | Task | Descrição | Status |
 |---|---|---|
-| TASK-001 | Criar o dicionário (`DICIONARIO.md`) no ambiente de testes | ⏳ |
-| TASK-002 | Compilar os 5 fontes (RDMake / TDS) | ⏳ |
-| TASK-003 | Executar VAL-001 a VAL-008 com `MV_XRSLOG = .T.` | ⏳ |
-| TASK-004 | Ajustes conforme as validações | ⏳ |
-| TASK-005 | Testes de cenário (seção 7) | ⏳ |
-| TASK-006 | Copiar os fontes para `protheus/SIGAFIN/...` e publicar | ⏳ |
+| TASK-001 | Validar as assinaturas de `FINM020`, `F240TIT`, `FA050UPD` e `FA080TIT` (fontes padrão 2510, seção 4) | ✅ |
+| TASK-002 | Reescrever `DICIONARIO.md` | ✅ — falta criar no ambiente de testes e apagar os `E1_X*`, se existirem |
+| TASK-003 | Reescrever `PXFINA37S` (serviços SE2 + `U_PXRSBloqueia`) | ✅ |
+| TASK-004 | Reescrever `PXFINA37` (tela SE2 e novas ações) | ✅ |
+| TASK-005 | Criar `FINM020`, `FA080TIT`, `FA050UPD`, `F240TIT` | ✅ |
+| TASK-006 | Remover `FINM010`/`FA070TIT` do projeto | ✅ — falta remover do RPO de testes |
+| TASK-007 | Ajustar `PXFINR25` para SE2 | ✅ |
+| TASK-008 | Compilar (RDMake/TDS) e executar VAL-001 a VAL-008 | ⏳ |
+| TASK-009 | Testes de cenário (seção 8) e publicação | ⏳ |
 
-## 7. Cenários de teste
+## 7. Dicionário (resumo para o `DICIONARIO.md`)
 
-1. Risco Sacado multi-filial: um lote por filial, sequência sem repetição e banco sem fornecedor em uma das filiais.
-2. Baixa manual de título com status `1` → bloqueada (`FA070TIT`). O mesmo vale para ExecAuto, lote e CNAB (`FINM010`).
-3. Status `2`: baixa parcial não gera SE2; a baixa total gera o SE2 (fornecedor do banco, natureza `MV_XRSNAT`, `E2_XORIRS`).
-4. Status `2` com `MV_XRSNAT` vazio ou fornecedor inválido → baixa bloqueada no `MODELPOS`.
-5. Cancelamento da baixa com SE2 em aberto → SE2 excluído. Com SE2 baixado ou em borderô → cancelamento bloqueado.
-6. Status `3`: a baixa manual não gera SE2.
-7. Baixa com motivo diferente de `NOR` (ex.: DAC, CMP) e status `2` → não gera SE2.
-8. Estornar Situação 2/3 → 1, com e sem baixa e com SE2 gerado.
-9. Excluir Lote com e sem baixa.
-10. Relatório PXFINR25 com filtros e totais.
+**SE2 — campos novos** (todos `Real`, `Visual`; só a rotina altera):
 
-## 8. Riscos
+| Campo | Tipo/Tam | Título | X3_CBOX / F3 |
+|---|---|---|---|
+| `E2_XRISCO` | C 1 | Risco Sacad | `S=Sim;N=Nao`, ini. `"N"` |
+| `E2_XLOTRS` | C 6 | Lote R.Sac. | |
+| `E2_XBANCO` | C 3 | Bco R.Sacad | F3 `SA6` |
+| `E2_XDTRISC` | D 8 | Dt.Env.Bco | |
+| `E2_XSTRIC` | C 1 | Sit.R.Sacad | `1=Disponivel;2=Antecipado;3=Em aberto` |
+| `E2_XDTANT` | D 8 | Dt.Antecip. | |
+| `E2_XORIRS` | C 40 | Orig.R.Sac. | Chave do SE2 original: `FILIAL+PREFIXO+NUM+PARCELA+TIPO+FORNECE+LOJA` (só no SE2 do banco) |
 
-- **RISK-001:** a natureza `MV_XRSNAT` com retenção (IR/PIS/COFINS/CSLL/ISS) calcularia impostos no SE2. Configure uma natureza sem retenção.
-- **RISK-002:** o bloqueio do status `1` no CNAB rejeita a ocorrência. O título continua aberto, e o retorno deve ser reprocessado depois de informada a situação.
-- **RISK-003:** `E1_XBANCO` guarda só o código. O fornecedor é lido da primeira agência/conta do banco com `A6_XFORN` preenchido.
-- **RISK-004:** o usuário que gerou o lote só fica registrado no log do servidor (decisão: sem tabela de cabeçalho).
+**SIX:** `E2_FILIAL+E2_XLOTRS` (`XLOTRS`); `E2_FILIAL+E2_XORIRS` (`XORIRS`).
+
+**SA6:** `A6_XFORN`/`A6_XLOJA` (sem alteração).
+
+**SX6:**
+
+| Parâmetro | Tipo | Descrição |
+|---|---|---|
+| `MV_XRSNAT` | C | Natureza do SE2 do banco (**sem retenção**) |
+| `MV_XRSPRF` | C | Prefixo do SE2 do banco (ex.: `RSC`) |
+| `MV_XRSTIP` | C | Tipo do SE2 do banco (ex.: `DP`) |
+| `MV_XRSMOT` | C | Motivo de baixa da antecipação (ex.: `RSA`) |
+| `MV_XRSLOG` | L | Log de diagnóstico dos PEs |
+
+**Motivo de baixa** (cadastro de motivos de baixa do SIGAFIN): `RSA` – "Risco Sacado Antecipado", **sem movimentação bancária**, sem cheque, sem comissão.
+
+**Removidos:** campos `E1_XRISCO`, `E1_XLOTRS`, `E1_XBANCO`, `E1_XDTRISC`, `E1_XSTRIC`, índice SE1 `XLOTRS` e a sequência `SE1/E1_XLOTRS`.
+
+**Menu:** `U_PXFINA37` em Atualizações > Contas a Pagar; `U_PXFINR25` em Relatórios > Contas a Pagar.
+
+## 8. Cenários de teste
+
+1. Disponibilizar em várias filiais: um lote por filial. Títulos não elegíveis (baixa parcial, em borderô, PA/NDF/TX) são rejeitados com log.
+2. Título `1`: baixa manual, baixa automática, CNAB, compensação, borderô, alteração e exclusão são **bloqueados**, cada um com a mensagem da rotina.
+3. Antecipado: o original fica baixado pelo motivo `RSA`, sem movimento bancário. O SE2 do banco é gerado com fornecedor do banco, natureza `MV_XRSNAT`, prefixo/tipo dos parâmetros, vencimento original e `E2_XORIRS`.
+4. Antecipado com `MV_XRSNAT` vazio ou banco sem fornecedor: título rejeitado e nada gravado (nem baixa).
+5. Antecipado de vários títulos com um erro no meio: só o título com erro é desfeito.
+5a. Antecipado de fornecedor com PCC/IR na baixa: TX gerados, SE2 do banco pelo líquido. Estorno exclui os TX; com TX já pago, o estorno é rejeitado.
+6. Título `2`: cancelar ou excluir a baixa do original fora da rotina → **bloqueado**. Excluir ou alterar o SE2 do banco → **bloqueado**. Baixar o SE2 do banco ou colocá-lo em borderô → **permitido**.
+7. Estornar 2 → 1 com o SE2 do banco em aberto: o SE2 do banco é excluído, a baixa do original é cancelada e o título volta a `1`. Com o SE2 do banco baixado ou em borderô → rejeitado.
+8. Em aberto (3): baixa, borderô e alteração funcionam normalmente. Estornar 3 → 1 sem movimento é permitido; com baixa, é rejeitado.
+9. Excluir Lote com e sem título `2`.
+10. Antecipar título de outra filial → rejeitado com orientação para logar na filial.
+11. Relatório PXFINR25 com filtros e totais por situação.
+
+## 9. O que muda em relação à v2.1
+
+| Tema | v2.1 (Receber) | v3.0 (Pagar) |
+|---|---|---|
+| Tabela base | SE1 (clientes) | **SE2 (fornecedores)** |
+| Situações | 1-Enviado, 2-Não pago, 3-Pago | **1-Disponível, 2-Antecipado, 3-Em aberto** |
+| Geração do SE2 do banco | Automática na baixa `NOR` do SE1 (PE `FINM010`, dentro da transação do padrão) | **Na própria rotina**, na ação "Antecipado", que também baixa o original. Não depende mais de PE para gravar |
+| Baixa do título original | Pelo usuário, nas rotinas padrão | **Pela rotina**, via ExecAuto `FINA080` com motivo `MV_XRSMOT` |
+| Bloqueios | Só a baixa do status `1` | Baixa, cancelamento, borderô, alteração e exclusão nos status `1` **e** `2`, mais a proteção do SE2 do banco |
+| PEs | `FINM010`, `FA070TIT` | `FINM020`, `FA080TIT`, `FA050UPD`, `F240TIT` |
+| Número do SE2 gerado | Cópia de prefixo/número do SE1 (risco de chave duplicada) | Prefixo/tipo por parâmetro e número = lote + sequência |
+| Emissão do SE2 gerado | Emissão original (retroativa) | Data da antecipação (elimina o antigo VAL-008) |
+| Estorno | Excluía o SE2 no cancelamento da baixa (via PE) | Ação "Estornar Situação" da rotina (exclui o SE2 do banco + cancela a baixa) |
+| Parâmetros | `MV_XRSNAT`, `MV_XRSLOG` | + `MV_XRSPRF`, `MV_XRSTIP`, `MV_XRSMOT` |
+
+## 10. Riscos e decisões em aberto
+
+- **RISK-001 (impostos retidos na baixa) — aceito pelo usuário em 2026-10-19:** se o fornecedor tem PCC/IR retidos **na baixa** (`MV_BX10925 = 1`), a baixa por antecipação gera os títulos de retenção (TX) e o SE2 do banco é gerado pelo **valor líquido**. Consequências:
+  - o valor do SE2 do banco pode **divergir do valor que o banco cobra** (normalmente o valor de face informado pelo banco). A diferença precisa ser conciliada manualmente com o banco/fornecedor;
+  - os títulos de retenção ficam vinculados à baixa do original. No estorno (2 → 1), o cancelamento da baixa via `FINA080` exclui as retenções pelo padrão. Se algum TX já estiver pago/em borderô, o padrão rejeita o cancelamento e o estorno é desfeito (VAL-008);
+  - a data de fato gerador das retenções passa a ser a data da antecipação, não o pagamento ao banco.
+  - Mitigação: o relatório `PXFINR25` mostra valor original, retenções e valor do SE2 do banco, e o log da antecipação registra o líquido.
+- **RISK-002:** a natureza `MV_XRSNAT` não pode ter retenção, senão o SE2 do banco calcula impostos de novo.
+- **RISK-003:** `E2_XBANCO` guarda só o código. O fornecedor do banco é lido da primeira agência/conta com `A6_XFORN` preenchido (mesma regra da v2.1).
+- **DEC-001 — decidido (2026-10-19):** um SE2 do banco **por título** antecipado. Facilita o estorno e a rastreabilidade (`E2_XORIRS`).
+- **DEC-002 — decidido (2026-10-19):** o retorno do banco (quais títulos foram antecipados) é informado **manualmente** na tela. A importação de arquivo do banco fica fora do escopo.
+- **DEC-003:** os juros/deságio da antecipação são do fornecedor com o banco e não entram no Protheus da empresa. O SE2 do banco usa o valor de face.
+- **RISK-004:** o usuário que gerou o lote ou a antecipação só fica registrado no log do servidor.

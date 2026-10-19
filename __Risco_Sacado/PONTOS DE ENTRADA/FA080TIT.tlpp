@@ -1,0 +1,30 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+
+/*/{Protheus.doc} FA080TIT
+Ponto de entrada de confirmação da baixa a pagar (FINA080), executado antes da transação de gravação.
+Risco Sacado: impede a baixa de título em situação 1 (Disponível) ou 2 (Antecipado) fora da
+rotina PXFINA37. Barreira antecipada; a regra também é garantida no PE MVC FINM020 (MODELPOS)
+para as demais rotinas de baixa (FINA090, FINA430, FINA340...).
+
+PARAMIXB: não recebe parâmetros. SE2 posicionado no título em baixa.
+Em rotina automática, o Help() é registrado no log do ExecAuto (lMsHelpAuto).
+
+@type user function
+@author bacoetrom
+@since 19/10/2026
+@return logical, .T. permite a baixa, .F. bloqueia
+/*/
+User Function FA080TIT() as logical
+    Local aArea := GetArea() as array
+    Local lRet  := .T. as logical
+    Local cMsg  := "" as character
+
+    cMsg := U_PXRSBloqueia("BAIXA")
+    If !Empty(cMsg)
+        lRet := .F.
+        Help(,, "PXRISCOSAC",, cMsg, 1, 0)
+    EndIf
+
+    RestArea(aArea)
+Return lRet

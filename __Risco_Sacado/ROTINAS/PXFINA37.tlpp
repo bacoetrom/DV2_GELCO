@@ -5,9 +5,10 @@
 #define RS_TITULO     "Risco Sacado"
 #define RS_RISCO_SIM  "S"
 #define RS_RISCO_NAO  "N"
-#define RS_ENVIADO    "1"
-#define RS_NAO_PAGO   "2"
-#define RS_PAGO       "3"
+#define RS_DISPONIVEL "1"
+#define RS_ANTECIPADO "2"
+#define RS_EM_ABERTO  "3"
+#define RS_TOLERANCIA 0.0049
 #define RS_MAX_LOG    40
 
 // Posições do array de parâmetros (ParamBox)
@@ -15,22 +16,21 @@
 #define PAR_FILATE    2
 #define PAR_VENCDE    3
 #define PAR_VENCATE   4
-#define PAR_PORTADO   5
-#define PAR_AGENCIA   6
-#define PAR_CONTA     7
-#define PAR_BORDE     8
-#define PAR_BORATE    9
-#define PAR_LOTEDE    10
-#define PAR_LOTEATE   11
-#define PAR_SITUAC    12
-#define PAR_BCORS     13
+#define PAR_FORDE     5
+#define PAR_FORATE    6
+#define PAR_NATDE     7
+#define PAR_NATATE    8
+#define PAR_LOTEDE    9
+#define PAR_LOTEATE   10
+#define PAR_SITUAC    11
+#define PAR_BCORS     12
 
 // Opções do parâmetro Situação (combo)
-#define SIT_SEM_RISCO 1
-#define SIT_ENVIADO   2
-#define SIT_NAO_PAGO  3
-#define SIT_PAGO      4
-#define SIT_EM_RISCO  5
+#define SIT_SEM_RISCO  1
+#define SIT_DISPONIVEL 2
+#define SIT_ANTECIPADO 3
+#define SIT_EM_ABERTO  4
+#define SIT_EM_RISCO   5
 
 // Posições do array de títulos marcados
 #define MRK_RECNO     1
@@ -39,29 +39,36 @@
 #define MRK_RISCO     4
 
 /*/{Protheus.doc} PXFINA37
-Risco Sacado - seleção de títulos a receber (SE1) para envio ao banco e controle da
-situação de retorno do banco.
+Risco Sacado em Contas a Pagar - seleção de títulos a pagar (SE2) de fornecedores para
+disponibilizar ao banco e controle do retorno (antecipado / em aberto).
 
 Ações:
-  - Risco Sacado      : marca os títulos (sem risco) e gera um lote por filial (E1_XLOTRS).
-  - Não Pago ao Banco : situação 1 -> 2 (na baixa NOR que liquida o título será gerado SE2 ao banco).
-  - Pago ao Banco     : situação 1 -> 3 (baixa manual pelo usuário, sem SE2).
-  - Estornar Situação : situação 2/3 -> 1 (somente sem baixa e sem SE2 gerado).
-  - Excluir Lote      : devolve todos os títulos do lote para "sem risco" (somente sem baixa).
+  - Disponibilizar    : títulos elegíveis (sem risco) -> situação 1, um lote por filial (E2_XLOTRS).
+  - Antecipado        : 1 -> 2. Baixa o título do fornecedor (motivo MV_XRSMOT) e gera o título a pagar do banco.
+  - Em aberto         : 1 -> 3. Título volta ao fluxo normal do Contas a Pagar.
+  - Estornar Situação : 3 -> 1 (sem movimento após o envio) e 2 -> 1 (exclui título do banco e cancela a baixa).
+  - Excluir Lote      : devolve os títulos do lote para "sem risco" (sem título antecipado e sem movimento).
+
+Situações 1 e 2 só podem ser movimentadas por esta rotina (PEs FINM020, FA080TIT, FA050UPD e F240TIT).
 
 Parâmetros (ParamBox - última seleção salva por usuário, sem dependência de SX1):
   01 Filial de / 02 Filial até / 03 Vencimento real de / 04 Vencimento real até /
-  05 Portador / 06 Agência / 07 Conta (vazios = todos) / 08 Borderô de / 09 Borderô até /
-  10 Lote de / 11 Lote até / 12 Situação (1=Sem risco;2=Enviado;3=Não pago;4=Pago;5=Todos em risco) /
-  13 Banco do risco sacado (SA6)
+  05 Fornecedor de / 06 Fornecedor até / 07 Natureza de / 08 Natureza até / 09 Lote de / 10 Lote até /
+  11 Situação (1=Sem risco;2=Disponível;3=Antecipado;4=Em aberto;5=Todos em risco) / 12 Banco do risco sacado (SA6)
 
-@type function
+@type user function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @return logical, .T. quando a tela foi aberta
 /*/
 User Function PXFINA37() as logical
     Local aPar := {} as array
+
+    If !U_PXRSDicionario()
+        FWAlertError("Campos do risco sacado não criados no dicionário (E2_X*, A6_XFORN, A6_XLOJA). " + ;
+                     "Crie os campos conforme DICIONARIO.md do projeto.", RS_TITULO)
+        Return .F.
+    EndIf
 
     aPar := Parametros()
     If Empty(aPar)
@@ -72,34 +79,34 @@ Return MontaTela(aPar)
 /*/{Protheus.doc} Parametros
 Exibe a tela de parâmetros (ParamBox) e devolve as respostas.
 A situação (combo) é normalizada para numérico.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @return array, respostas na ordem das constantes PAR_* ou vazio quando cancelado
 /*/
 Static Function Parametros() as array
     Local aPergs    := {} as array
     Local aRet      := {} as array
     Local aSituacao := {} as array
-    Local nTamFil   := TamSX3("E1_FILIAL")[1] as numeric
-    Local nTamBor   := TamSX3("E1_NUMBOR")[1] as numeric
-    Local nTamLote  := TamSX3("E1_XLOTRS")[1] as numeric
+    Local nTamFil   := TamSX3("E2_FILIAL")[1] as numeric
+    Local nTamFor   := TamSX3("E2_FORNECE")[1] as numeric
+    Local nTamNat   := TamSX3("E2_NATUREZ")[1] as numeric
+    Local nTamLote  := TamSX3("E2_XLOTRS")[1] as numeric
 
-    aSituacao := {"1-Sem risco", "2-Enviado ao Banco", "3-Não pago ao Banco", "4-Pago ao Banco", "5-Todos em risco"}
+    aSituacao := {"1-Sem risco", "2-Disponível", "3-Antecipado", "4-Em aberto", "5-Todos em risco"}
 
-    aAdd(aPergs, {1, "Filial de"            , Space(nTamFil)                      , "@!", ".T.", "SM0", ".T.", 50, .F.})
-    aAdd(aPergs, {1, "Filial até"           , Replicate("Z", nTamFil)             , "@!", ".T.", "SM0", ".T.", 50, .T.})
-    aAdd(aPergs, {1, "Vencto real de"       , FirstDay(dDataBase)                 , ""  , ".T.", ""   , ".T.", 50, .T.})
-    aAdd(aPergs, {1, "Vencto real até"      , LastDay(dDataBase)                  , ""  , ".T.", ""   , ".T.", 50, .T.})
-    aAdd(aPergs, {1, "Portador (vazio=todos)", Space(TamSX3("E1_PORTADO")[1])     , "@!", ".T.", "SA6", ".T.", 30, .F.})
-    aAdd(aPergs, {1, "Agência (vazio=todas)", Space(TamSX3("E1_AGEDEP")[1])       , "@!", ".T.", ""   , ".T.", 40, .F.})
-    aAdd(aPergs, {1, "Conta (vazio=todas)"  , Space(TamSX3("E1_CONTA")[1])        , "@!", ".T.", ""   , ".T.", 60, .F.})
-    aAdd(aPergs, {1, "Borderô de"           , Space(nTamBor)                      , "@!", ".T.", ""   , ".T.", 40, .F.})
-    aAdd(aPergs, {1, "Borderô até"          , Replicate("Z", nTamBor)             , "@!", ".T.", ""   , ".T.", 40, .T.})
-    aAdd(aPergs, {1, "Lote de"              , Space(nTamLote)                     , "@!", ".T.", ""   , ".T.", 40, .F.})
-    aAdd(aPergs, {1, "Lote até"             , Replicate("Z", nTamLote)            , "@!", ".T.", ""   , ".T.", 40, .T.})
-    aAdd(aPergs, {2, "Situação"             , aSituacao[1]                        , aSituacao, 90, ".T.", .T.})
-    aAdd(aPergs, {1, "Banco do risco sacado", Space(TamSX3("A6_COD")[1])          , "@!", ".T.", "SA6", ".T.", 30, .F.})
+    aAdd(aPergs, {1, "Filial de"            , Space(nTamFil)               , "@!", ".T.", "SM0", ".T.", 50, .F.})
+    aAdd(aPergs, {1, "Filial até"           , Replicate("Z", nTamFil)      , "@!", ".T.", "SM0", ".T.", 50, .T.})
+    aAdd(aPergs, {1, "Vencto real de"       , FirstDay(dDataBase)          , ""  , ".T.", ""   , ".T.", 50, .T.})
+    aAdd(aPergs, {1, "Vencto real até"      , LastDay(dDataBase)           , ""  , ".T.", ""   , ".T.", 50, .T.})
+    aAdd(aPergs, {1, "Fornecedor de"        , Space(nTamFor)               , "@!", ".T.", "SA2", ".T.", 50, .F.})
+    aAdd(aPergs, {1, "Fornecedor até"       , Replicate("Z", nTamFor)      , "@!", ".T.", "SA2", ".T.", 50, .T.})
+    aAdd(aPergs, {1, "Natureza de"          , Space(nTamNat)               , "@!", ".T.", "SED", ".T.", 50, .F.})
+    aAdd(aPergs, {1, "Natureza até"         , Replicate("Z", nTamNat)      , "@!", ".T.", "SED", ".T.", 50, .T.})
+    aAdd(aPergs, {1, "Lote de"              , Space(nTamLote)              , "@!", ".T.", ""   , ".T.", 40, .F.})
+    aAdd(aPergs, {1, "Lote até"             , Replicate("Z", nTamLote)     , "@!", ".T.", ""   , ".T.", 40, .T.})
+    aAdd(aPergs, {2, "Situação"             , aSituacao[1]                 , aSituacao, 90, ".T.", .T.})
+    aAdd(aPergs, {1, "Banco do risco sacado", Space(TamSX3("A6_COD")[1])   , "@!", ".T.", "SA6", ".T.", 30, .F.})
 
     If !ParamBox(aPergs, "Risco Sacado - Parâmetros", @aRet, , , , , , , RS_PARAM_LOAD, .T., .T.)
         Return {}
@@ -110,9 +117,9 @@ Return aRet
 
 /*/{Protheus.doc} OpcaoCombo
 Converte o retorno do combo do ParamBox ("n-Descrição" ou posição numérica) em número.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param xOpcao, variant, retorno do combo
 @return numeric, número da opção
 /*/
@@ -128,9 +135,9 @@ Return nOpcao
 
 /*/{Protheus.doc} MontaTela
 Cria a tabela temporária, carrega os títulos e exibe o FWMarkBrowse.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param aPar, array, respostas dos parâmetros (ParamBox)
 @return logical, .T. quando a tela foi exibida
 /*/
@@ -157,7 +164,7 @@ Static Function MontaTela(aPar as array) as logical
 
     oMark := FWMarkBrowse():New()
     oMark:SetOwner(oDlg)
-    oMark:SetDescription("Risco Sacado - Títulos a Receber")
+    oMark:SetDescription("Risco Sacado - Títulos a Pagar")
     oMark:SetAlias(cAlias)
     oMark:SetFieldMark("TR_OK")
     oMark:SetTemporary(.T.)
@@ -168,10 +175,10 @@ Static Function MontaTela(aPar as array) as logical
     oMark:AddButton("Marcar Todos"     , {|| MarcaTodos(oMark, 1)})
     oMark:AddButton("Desmarcar Todos"  , {|| MarcaTodos(oMark, 2)})
     oMark:AddButton("Inverter Seleção" , {|| MarcaTodos(oMark, 3)})
-    oMark:AddButton("Risco Sacado"     , {|| AcaoRiscoSacado(oMark, aPar)})
-    oMark:AddButton("Não Pago ao Banco", {|| AcaoSituacao(oMark, aPar, RS_NAO_PAGO)})
-    oMark:AddButton("Pago ao Banco"    , {|| AcaoSituacao(oMark, aPar, RS_PAGO)})
-    oMark:AddButton("Estornar Situação", {|| AcaoSituacao(oMark, aPar, RS_ENVIADO)})
+    oMark:AddButton("Disponibilizar"   , {|| AcaoDisponibilizar(oMark, aPar)})
+    oMark:AddButton("Antecipado"       , {|| AcaoAntecipado(oMark, aPar)})
+    oMark:AddButton("Em aberto"        , {|| AcaoEmAberto(oMark, aPar)})
+    oMark:AddButton("Estornar Situação", {|| AcaoEstorno(oMark, aPar)})
     oMark:AddButton("Excluir Lote"     , {|| AcaoExcluirLote(oMark, aPar)})
     oMark:AddButton("Sair"             , {|| oDlg:End()})
 
@@ -187,9 +194,9 @@ Return .T.
 
 /*/{Protheus.doc} CriaTemporaria
 Cria a tabela temporária do browse (FWTemporaryTable).
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @return object, instância de FWTemporaryTable já criada
 /*/
 Static Function CriaTemporaria() as object
@@ -197,26 +204,27 @@ Static Function CriaTemporaria() as object
     Local oTmp    as object
 
     aAdd(aCampos, {"TR_OK"    , "C", 2                        , 0})
-    aAdd(aCampos, {"TR_FILIAL", "C", TamSX3("E1_FILIAL")[1]   , 0})
-    aAdd(aCampos, {"TR_LOTE"  , "C", TamSX3("E1_XLOTRS")[1]   , 0})
+    aAdd(aCampos, {"TR_FILIAL", "C", TamSX3("E2_FILIAL")[1]   , 0})
+    aAdd(aCampos, {"TR_LOTE"  , "C", TamSX3("E2_XLOTRS")[1]   , 0})
     aAdd(aCampos, {"TR_RISCO" , "C", 1                        , 0})
     aAdd(aCampos, {"TR_STATUS", "C", 1                        , 0})
     aAdd(aCampos, {"TR_SITUAC", "C", 20                       , 0})
-    aAdd(aCampos, {"TR_PREFIX", "C", TamSX3("E1_PREFIXO")[1]  , 0})
-    aAdd(aCampos, {"TR_NUM"   , "C", TamSX3("E1_NUM")[1]      , 0})
-    aAdd(aCampos, {"TR_PARCEL", "C", TamSX3("E1_PARCELA")[1]  , 0})
-    aAdd(aCampos, {"TR_TIPO"  , "C", TamSX3("E1_TIPO")[1]     , 0})
-    aAdd(aCampos, {"TR_CLIENT", "C", TamSX3("E1_CLIENTE")[1]  , 0})
-    aAdd(aCampos, {"TR_LOJA"  , "C", TamSX3("E1_LOJA")[1]     , 0})
-    aAdd(aCampos, {"TR_NOMCLI", "C", TamSX3("E1_NOMCLI")[1]   , 0})
+    aAdd(aCampos, {"TR_PREFIX", "C", TamSX3("E2_PREFIXO")[1]  , 0})
+    aAdd(aCampos, {"TR_NUM"   , "C", TamSX3("E2_NUM")[1]      , 0})
+    aAdd(aCampos, {"TR_PARCEL", "C", TamSX3("E2_PARCELA")[1]  , 0})
+    aAdd(aCampos, {"TR_TIPO"  , "C", TamSX3("E2_TIPO")[1]     , 0})
+    aAdd(aCampos, {"TR_FORNEC", "C", TamSX3("E2_FORNECE")[1]  , 0})
+    aAdd(aCampos, {"TR_LOJA"  , "C", TamSX3("E2_LOJA")[1]     , 0})
+    aAdd(aCampos, {"TR_NOMFOR", "C", TamSX3("E2_NOMFOR")[1]   , 0})
+    aAdd(aCampos, {"TR_NATURE", "C", TamSX3("E2_NATUREZ")[1]  , 0})
     aAdd(aCampos, {"TR_EMISSA", "D", 8                        , 0})
     aAdd(aCampos, {"TR_VENCRE", "D", 8                        , 0})
-    aAdd(aCampos, {"TR_VALOR" , "N", TamSX3("E1_VALOR")[1]    , TamSX3("E1_VALOR")[2]})
-    aAdd(aCampos, {"TR_SALDO" , "N", TamSX3("E1_SALDO")[1]    , TamSX3("E1_SALDO")[2]})
-    aAdd(aCampos, {"TR_PORTAD", "C", TamSX3("E1_PORTADO")[1]  , 0})
-    aAdd(aCampos, {"TR_NUMBOR", "C", TamSX3("E1_NUMBOR")[1]   , 0})
-    aAdd(aCampos, {"TR_XBANCO", "C", TamSX3("E1_XBANCO")[1]   , 0})
-    aAdd(aCampos, {"TR_RECSE1", "N", 12                       , 0})
+    aAdd(aCampos, {"TR_VALOR" , "N", TamSX3("E2_VALOR")[1]    , TamSX3("E2_VALOR")[2]})
+    aAdd(aCampos, {"TR_SALDO" , "N", TamSX3("E2_SALDO")[1]    , TamSX3("E2_SALDO")[2]})
+    aAdd(aCampos, {"TR_NUMBOR", "C", TamSX3("E2_NUMBOR")[1]   , 0})
+    aAdd(aCampos, {"TR_XBANCO", "C", TamSX3("E2_XBANCO")[1]   , 0})
+    aAdd(aCampos, {"TR_DTANT" , "D", 8                        , 0})
+    aAdd(aCampos, {"TR_RECSE2", "N", 12                       , 0})
 
     oTmp := FWTemporaryTable():New(GetNextAlias())
     oTmp:SetFields(aCampos)
@@ -225,10 +233,11 @@ Static Function CriaTemporaria() as object
 Return oTmp
 
 /*/{Protheus.doc} CarregaTitulos
-Seleciona os títulos a receber conforme os parâmetros e grava na tabela temporária.
-@type function
+Seleciona os títulos a pagar conforme os parâmetros e grava na tabela temporária.
+Não lista os títulos a pagar do banco gerados pelo risco sacado (E2_XORIRS preenchido).
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param cAlias, character, alias da tabela temporária
 @param aPar, array, respostas dos parâmetros (ParamBox)
 @return numeric, quantidade de títulos carregados
@@ -244,62 +253,58 @@ Static Function CarregaTitulos(cAlias as character, aPar as array) as numeric
 
     nSituac := aPar[PAR_SITUAC]
 
-    cQuery := "SELECT SE1.E1_FILIAL, SE1.E1_PREFIXO, SE1.E1_NUM, SE1.E1_PARCELA, SE1.E1_TIPO, "
-    cQuery += "       SE1.E1_CLIENTE, SE1.E1_LOJA, SE1.E1_NOMCLI, SE1.E1_EMISSAO, SE1.E1_VENCREA, "
-    cQuery += "       SE1.E1_VALOR, SE1.E1_SALDO, SE1.E1_PORTADO, SE1.E1_NUMBOR, "
-    cQuery += "       SE1.E1_XBANCO, SE1.E1_XLOTRS, SE1.E1_XRISCO, SE1.E1_XSTRIC, SE1.R_E_C_N_O_ RECSE1 "
-    cQuery += "  FROM " + RetSqlName("SE1") + " SE1 "
-    cQuery += " WHERE SE1.D_E_L_E_T_ = ? "
+    cQuery := "SELECT SE2.E2_FILIAL, SE2.E2_PREFIXO, SE2.E2_NUM, SE2.E2_PARCELA, SE2.E2_TIPO, "
+    cQuery += "       SE2.E2_FORNECE, SE2.E2_LOJA, SE2.E2_NOMFOR, SE2.E2_NATUREZ, SE2.E2_EMISSAO, SE2.E2_VENCREA, "
+    cQuery += "       SE2.E2_VALOR, SE2.E2_SALDO, SE2.E2_NUMBOR, "
+    cQuery += "       SE2.E2_XBANCO, SE2.E2_XLOTRS, SE2.E2_XRISCO, SE2.E2_XSTRIC, SE2.E2_XDTANT, SE2.R_E_C_N_O_ RECSE2 "
+    cQuery += "  FROM " + RetSqlName("SE2") + " SE2 "
+    cQuery += " WHERE SE2.D_E_L_E_T_ = ? "
     aAdd(aBind, " ")
-    cQuery += "   AND SE1.E1_FILIAL BETWEEN ? AND ? "
+    cQuery += "   AND SE2.E2_FILIAL BETWEEN ? AND ? "
     aAdd(aBind, aPar[PAR_FILDE])
     aAdd(aBind, aPar[PAR_FILATE])
-    cQuery += "   AND SE1.E1_VENCREA BETWEEN ? AND ? "
+    cQuery += "   AND SE2.E2_VENCREA BETWEEN ? AND ? "
     aAdd(aBind, DtoS(aPar[PAR_VENCDE]))
     aAdd(aBind, DtoS(aPar[PAR_VENCATE]))
-    cQuery += "   AND SE1.E1_NUMBOR BETWEEN ? AND ? "
-    aAdd(aBind, aPar[PAR_BORDE])
-    aAdd(aBind, aPar[PAR_BORATE])
-    cQuery += "   AND SE1.E1_XLOTRS BETWEEN ? AND ? "
+    cQuery += "   AND SE2.E2_FORNECE BETWEEN ? AND ? "
+    aAdd(aBind, aPar[PAR_FORDE])
+    aAdd(aBind, aPar[PAR_FORATE])
+    cQuery += "   AND SE2.E2_NATUREZ BETWEEN ? AND ? "
+    aAdd(aBind, aPar[PAR_NATDE])
+    aAdd(aBind, aPar[PAR_NATATE])
+    cQuery += "   AND SE2.E2_XLOTRS BETWEEN ? AND ? "
     aAdd(aBind, aPar[PAR_LOTEDE])
     aAdd(aBind, aPar[PAR_LOTEATE])
-    cQuery += "   AND SE1.E1_SALDO > 0 "
-    // Exclui abatimentos (tipos com '-'), adiantamentos, créditos e provisórios
-    cQuery += "   AND SUBSTRING(SE1.E1_TIPO, 3, 1) <> '-' "
-    cQuery += "   AND SE1.E1_TIPO NOT IN ('RA ', 'NCC', 'PR ') "
-
-    If !Empty(aPar[PAR_PORTADO])
-        cQuery += "   AND SE1.E1_PORTADO = ? "
-        aAdd(aBind, aPar[PAR_PORTADO])
-    EndIf
-    If !Empty(aPar[PAR_AGENCIA])
-        cQuery += "   AND SE1.E1_AGEDEP = ? "
-        aAdd(aBind, aPar[PAR_AGENCIA])
-    EndIf
-    If !Empty(aPar[PAR_CONTA])
-        cQuery += "   AND SE1.E1_CONTA = ? "
-        aAdd(aBind, aPar[PAR_CONTA])
-    EndIf
+    // Títulos do banco gerados pelo risco sacado não são listados
+    cQuery += "   AND SE2.E2_XORIRS = ? "
+    aAdd(aBind, Space(TamSX3("E2_XORIRS")[1]))
+    // Exclui abatimentos (tipos com '-'), adiantamentos, provisórios e impostos
+    cQuery += "   AND SUBSTRING(SE2.E2_TIPO, 3, 1) <> '-' "
+    cQuery += "   AND SE2.E2_TIPO NOT IN ('PA ', 'NDF', 'PR ', 'TX ', 'ISS', 'INS') "
 
     If nSituac == SIT_SEM_RISCO
-        cQuery += "   AND (SE1.E1_XRISCO <> ?  OR RTRIM(SE1.E1_XRISCO) IS NULL) "
+        // Somente candidatos: em aberto, sem baixa parcial e fora de borderô
+        cQuery += "   AND (SE2.E2_XRISCO <> ? OR RTRIM(SE2.E2_XRISCO) IS NULL) "
         aAdd(aBind, RS_RISCO_SIM)
+        cQuery += "   AND SE2.E2_SALDO > 0 "
+        cQuery += "   AND SE2.E2_NUMBOR = ? "
+        aAdd(aBind, Space(TamSX3("E2_NUMBOR")[1]))
     Else
-        cQuery += "   AND SE1.E1_XRISCO = ? "
+        cQuery += "   AND SE2.E2_XRISCO = ? "
         aAdd(aBind, RS_RISCO_SIM)
-        If nSituac == SIT_ENVIADO
-            cQuery += "   AND SE1.E1_XSTRIC = ? "
-            aAdd(aBind, RS_ENVIADO)
-        ElseIf nSituac == SIT_NAO_PAGO
-            cQuery += "   AND SE1.E1_XSTRIC = ? "
-            aAdd(aBind, RS_NAO_PAGO)
-        ElseIf nSituac == SIT_PAGO
-            cQuery += "   AND SE1.E1_XSTRIC = ? "
-            aAdd(aBind, RS_PAGO)
+        If nSituac == SIT_DISPONIVEL
+            cQuery += "   AND SE2.E2_XSTRIC = ? "
+            aAdd(aBind, RS_DISPONIVEL)
+        ElseIf nSituac == SIT_ANTECIPADO
+            cQuery += "   AND SE2.E2_XSTRIC = ? "
+            aAdd(aBind, RS_ANTECIPADO)
+        ElseIf nSituac == SIT_EM_ABERTO
+            cQuery += "   AND SE2.E2_XSTRIC = ? "
+            aAdd(aBind, RS_EM_ABERTO)
         EndIf
     EndIf
 
-    cQuery += " ORDER BY SE1.E1_FILIAL, SE1.E1_XLOTRS, SE1.E1_VENCREA, SE1.E1_PREFIXO, SE1.E1_NUM, SE1.E1_PARCELA "
+    cQuery += " ORDER BY SE2.E2_FILIAL, SE2.E2_XLOTRS, SE2.E2_VENCREA, SE2.E2_PREFIXO, SE2.E2_NUM, SE2.E2_PARCELA "
 
     oStatement := FWExecStatement():New(ChangeQuery(cQuery))
     For nI := 1 To Len(aBind)
@@ -310,26 +315,27 @@ Static Function CarregaTitulos(cAlias as character, aPar as array) as numeric
     While !(cAliasQry)->(Eof())
         RecLock(cAlias, .T.)
         (cAlias)->TR_OK     := Space(2)
-        (cAlias)->TR_FILIAL := (cAliasQry)->E1_FILIAL
-        (cAlias)->TR_LOTE   := (cAliasQry)->E1_XLOTRS
-        (cAlias)->TR_RISCO  := (cAliasQry)->E1_XRISCO
-        (cAlias)->TR_STATUS := (cAliasQry)->E1_XSTRIC
-        (cAlias)->TR_SITUAC := U_PXRSDescSituacao((cAliasQry)->E1_XRISCO, (cAliasQry)->E1_XSTRIC)
-        (cAlias)->TR_PREFIX := (cAliasQry)->E1_PREFIXO
-        (cAlias)->TR_NUM    := (cAliasQry)->E1_NUM
-        (cAlias)->TR_PARCEL := (cAliasQry)->E1_PARCELA
-        (cAlias)->TR_TIPO   := (cAliasQry)->E1_TIPO
-        (cAlias)->TR_CLIENT := (cAliasQry)->E1_CLIENTE
-        (cAlias)->TR_LOJA   := (cAliasQry)->E1_LOJA
-        (cAlias)->TR_NOMCLI := (cAliasQry)->E1_NOMCLI
-        (cAlias)->TR_EMISSA := StoD((cAliasQry)->E1_EMISSAO)
-        (cAlias)->TR_VENCRE := StoD((cAliasQry)->E1_VENCREA)
-        (cAlias)->TR_VALOR  := (cAliasQry)->E1_VALOR
-        (cAlias)->TR_SALDO  := (cAliasQry)->E1_SALDO
-        (cAlias)->TR_PORTAD := (cAliasQry)->E1_PORTADO
-        (cAlias)->TR_NUMBOR := (cAliasQry)->E1_NUMBOR
-        (cAlias)->TR_XBANCO := (cAliasQry)->E1_XBANCO
-        (cAlias)->TR_RECSE1 := (cAliasQry)->RECSE1
+        (cAlias)->TR_FILIAL := (cAliasQry)->E2_FILIAL
+        (cAlias)->TR_LOTE   := (cAliasQry)->E2_XLOTRS
+        (cAlias)->TR_RISCO  := (cAliasQry)->E2_XRISCO
+        (cAlias)->TR_STATUS := (cAliasQry)->E2_XSTRIC
+        (cAlias)->TR_SITUAC := U_PXRSDescSituacao((cAliasQry)->E2_XRISCO, (cAliasQry)->E2_XSTRIC)
+        (cAlias)->TR_PREFIX := (cAliasQry)->E2_PREFIXO
+        (cAlias)->TR_NUM    := (cAliasQry)->E2_NUM
+        (cAlias)->TR_PARCEL := (cAliasQry)->E2_PARCELA
+        (cAlias)->TR_TIPO   := (cAliasQry)->E2_TIPO
+        (cAlias)->TR_FORNEC := (cAliasQry)->E2_FORNECE
+        (cAlias)->TR_LOJA   := (cAliasQry)->E2_LOJA
+        (cAlias)->TR_NOMFOR := (cAliasQry)->E2_NOMFOR
+        (cAlias)->TR_NATURE := (cAliasQry)->E2_NATUREZ
+        (cAlias)->TR_EMISSA := StoD((cAliasQry)->E2_EMISSAO)
+        (cAlias)->TR_VENCRE := StoD((cAliasQry)->E2_VENCREA)
+        (cAlias)->TR_VALOR  := (cAliasQry)->E2_VALOR
+        (cAlias)->TR_SALDO  := (cAliasQry)->E2_SALDO
+        (cAlias)->TR_NUMBOR := (cAliasQry)->E2_NUMBOR
+        (cAlias)->TR_XBANCO := (cAliasQry)->E2_XBANCO
+        (cAlias)->TR_DTANT  := StoD((cAliasQry)->E2_XDTANT)
+        (cAlias)->TR_RECSE2 := (cAliasQry)->RECSE2
         (cAlias)->(MsUnlock())
         nQtd++
         (cAliasQry)->(DbSkip())
@@ -342,9 +348,9 @@ Return nQtd
 
 /*/{Protheus.doc} DefineColunas
 Monta as colunas do FWMarkBrowse.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param cAlias, character, alias da tabela temporária
 @return array, colunas no formato aceito por SetColumns
 /*/
@@ -355,23 +361,24 @@ Static Function DefineColunas(cAlias as character) as array
     Local bDado    as codeblock
 
     // {Campo, Título, Picture, Tamanho, Decimais, Alinhamento (0=Centro;1=Esquerda;2=Direita)}
-    aAdd(aDef, {"TR_FILIAL", "Filial"      , "@!"                  , TamSX3("E1_FILIAL")[1]  , 0                     , 1})
-    aAdd(aDef, {"TR_LOTE"  , "Lote"        , "@!"                  , TamSX3("E1_XLOTRS")[1]  , 0                     , 1})
+    aAdd(aDef, {"TR_FILIAL", "Filial"      , "@!"                  , TamSX3("E2_FILIAL")[1]  , 0                     , 1})
+    aAdd(aDef, {"TR_LOTE"  , "Lote"        , "@!"                  , TamSX3("E2_XLOTRS")[1]  , 0                     , 1})
     aAdd(aDef, {"TR_SITUAC", "Situação"    , "@!"                  , 20                      , 0                     , 1})
-    aAdd(aDef, {"TR_PREFIX", "Prefixo"     , "@!"                  , TamSX3("E1_PREFIXO")[1] , 0                     , 1})
-    aAdd(aDef, {"TR_NUM"   , "Número"      , "@!"                  , TamSX3("E1_NUM")[1]     , 0                     , 1})
-    aAdd(aDef, {"TR_PARCEL", "Parcela"     , "@!"                  , TamSX3("E1_PARCELA")[1] , 0                     , 1})
-    aAdd(aDef, {"TR_TIPO"  , "Tipo"        , "@!"                  , TamSX3("E1_TIPO")[1]    , 0                     , 1})
-    aAdd(aDef, {"TR_CLIENT", "Cliente"     , "@!"                  , TamSX3("E1_CLIENTE")[1] , 0                     , 1})
-    aAdd(aDef, {"TR_LOJA"  , "Loja"        , "@!"                  , TamSX3("E1_LOJA")[1]    , 0                     , 1})
-    aAdd(aDef, {"TR_NOMCLI", "Nome"        , "@!"                  , TamSX3("E1_NOMCLI")[1]  , 0                     , 1})
+    aAdd(aDef, {"TR_PREFIX", "Prefixo"     , "@!"                  , TamSX3("E2_PREFIXO")[1] , 0                     , 1})
+    aAdd(aDef, {"TR_NUM"   , "Número"      , "@!"                  , TamSX3("E2_NUM")[1]     , 0                     , 1})
+    aAdd(aDef, {"TR_PARCEL", "Parcela"     , "@!"                  , TamSX3("E2_PARCELA")[1] , 0                     , 1})
+    aAdd(aDef, {"TR_TIPO"  , "Tipo"        , "@!"                  , TamSX3("E2_TIPO")[1]    , 0                     , 1})
+    aAdd(aDef, {"TR_FORNEC", "Fornecedor"  , "@!"                  , TamSX3("E2_FORNECE")[1] , 0                     , 1})
+    aAdd(aDef, {"TR_LOJA"  , "Loja"        , "@!"                  , TamSX3("E2_LOJA")[1]    , 0                     , 1})
+    aAdd(aDef, {"TR_NOMFOR", "Nome"        , "@!"                  , TamSX3("E2_NOMFOR")[1]  , 0                     , 1})
+    aAdd(aDef, {"TR_NATURE", "Natureza"    , "@!"                  , TamSX3("E2_NATUREZ")[1] , 0                     , 1})
     aAdd(aDef, {"TR_EMISSA", "Emissão"     , ""                    , 10                      , 0                     , 0})
     aAdd(aDef, {"TR_VENCRE", "Vencto Real" , ""                    , 10                      , 0                     , 0})
-    aAdd(aDef, {"TR_VALOR" , "Valor"       , X3Picture("E1_VALOR") , TamSX3("E1_VALOR")[1]   , TamSX3("E1_VALOR")[2] , 2})
-    aAdd(aDef, {"TR_SALDO" , "Saldo"       , X3Picture("E1_SALDO") , TamSX3("E1_SALDO")[1]   , TamSX3("E1_SALDO")[2] , 2})
-    aAdd(aDef, {"TR_PORTAD", "Portador"    , "@!"                  , TamSX3("E1_PORTADO")[1] , 0                     , 1})
-    aAdd(aDef, {"TR_NUMBOR", "Borderô"     , "@!"                  , TamSX3("E1_NUMBOR")[1]  , 0                     , 1})
-    aAdd(aDef, {"TR_XBANCO", "Banco Risco" , "@!"                  , TamSX3("E1_XBANCO")[1]  , 0                     , 1})
+    aAdd(aDef, {"TR_VALOR" , "Valor"       , X3Picture("E2_VALOR") , TamSX3("E2_VALOR")[1]   , TamSX3("E2_VALOR")[2] , 2})
+    aAdd(aDef, {"TR_SALDO" , "Saldo"       , X3Picture("E2_SALDO") , TamSX3("E2_SALDO")[1]   , TamSX3("E2_SALDO")[2] , 2})
+    aAdd(aDef, {"TR_NUMBOR", "Borderô"     , "@!"                  , TamSX3("E2_NUMBOR")[1]  , 0                     , 1})
+    aAdd(aDef, {"TR_XBANCO", "Banco Risco" , "@!"                  , TamSX3("E2_XBANCO")[1]  , 0                     , 1})
+    aAdd(aDef, {"TR_DTANT" , "Dt.Antecip." , ""                    , 10                      , 0                     , 0})
 
     For nI := 1 To Len(aDef)
         bDado := &("{|| ('" + cAlias + "')->" + aDef[nI][1] + "}")
@@ -384,9 +391,9 @@ Return aColunas
 
 /*/{Protheus.doc} MarcaTodos
 Marca, desmarca ou inverte a seleção de todos os registros do browse.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param oMark, object, FWMarkBrowse
 @param nModo, numeric, 1=Marcar todos; 2=Desmarcar todos; 3=Inverter
 @return logical, sempre .T.
@@ -418,11 +425,11 @@ Return .T.
 
 /*/{Protheus.doc} ColetaMarcados
 Retorna os títulos marcados no browse.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param oMark, object, FWMarkBrowse
-@return array, {{nRecSE1, cFilTit, cLote, cRisco}, ...}
+@return array, {{nRecSE2, cFilTit, cLote, cRisco}, ...}
 /*/
 Static Function ColetaMarcados(oMark as object) as array
     Local aSel   := {} as array
@@ -433,23 +440,23 @@ Static Function ColetaMarcados(oMark as object) as array
     (cAlias)->(DbGoTop())
     While !(cAlias)->(Eof())
         If (cAlias)->TR_OK == cMarca
-            aAdd(aSel, {(cAlias)->TR_RECSE1, (cAlias)->TR_FILIAL, (cAlias)->TR_LOTE, (cAlias)->TR_RISCO})
+            aAdd(aSel, {(cAlias)->TR_RECSE2, (cAlias)->TR_FILIAL, (cAlias)->TR_LOTE, (cAlias)->TR_RISCO})
         EndIf
         (cAlias)->(DbSkip())
     EndDo
     (cAlias)->(DbGoTo(nRecno))
 Return aSel
 
-/*/{Protheus.doc} AcaoRiscoSacado
-Ação "Risco Sacado": envia os títulos marcados ao banco, gerando um lote por filial.
-@type function
+/*/{Protheus.doc} AcaoDisponibilizar
+Ação "Disponibilizar": envia os títulos marcados ao banco, gerando um lote por filial.
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param oMark, object, FWMarkBrowse
 @param aPar, array, respostas dos parâmetros (ParamBox)
 @return logical, .T. quando processado
 /*/
-Static Function AcaoRiscoSacado(oMark as object, aPar as array) as logical
+Static Function AcaoDisponibilizar(oMark as object, aPar as array) as logical
     Local aSel     := {} as array
     Local aFiliais := {} as array
     Local aForn    := {} as array
@@ -461,7 +468,7 @@ Static Function AcaoRiscoSacado(oMark as object, aPar as array) as logical
 
     cBanco := aPar[PAR_BCORS]
     If Empty(cBanco)
-        FWAlertWarning("Informe o banco do risco sacado no parâmetro 'Banco do risco sacado.'", RS_TITULO)
+        FWAlertWarning("Informe o banco do risco sacado no parâmetro 'Banco do risco sacado'.", RS_TITULO)
         Return .F.
     EndIf
 
@@ -471,8 +478,8 @@ Static Function AcaoRiscoSacado(oMark as object, aPar as array) as logical
         Return .F.
     EndIf
 
-    If !MsgYesNo("Confirma o envio de " + cValToChar(Len(aSel)) + " título(s) em Risco Sacado para o banco " + ;
-                 AllTrim(cBanco) + "?" + CRLF + "Será gerado um lote por filial.", RS_TITULO)
+    If !MsgYesNo("Confirma disponibilizar " + cValToChar(Len(aSel)) + " título(s) ao banco " + ;
+                 AllTrim(cBanco) + " no Risco Sacado?" + CRLF + "Será gerado um lote por filial.", RS_TITULO)
         Return .F.
     EndIf
 
@@ -502,7 +509,7 @@ Static Function AcaoRiscoSacado(oMark as object, aPar as array) as logical
             aAdd(aLog, "Filial " + AllTrim(cFilTit) + ": fornecedor " + AllTrim(aForn[1]) + "/" + AllTrim(aForn[2]) + ;
                        " do banco não cadastrado. Títulos não processados.")
         Else
-            ProcessaLote(cFilTit, cBanco, aFiliais[nI][2], aLog)
+            ProcessaLote(cFilTit, cBanco, aForn, aFiliais[nI][2], aLog)
         EndIf
     Next nI
 
@@ -511,44 +518,47 @@ Static Function AcaoRiscoSacado(oMark as object, aPar as array) as logical
 Return .T.
 
 /*/{Protheus.doc} ProcessaLote
-Gera o lote de risco sacado de uma filial e marca os títulos.
-@type function
+Gera o lote de risco sacado de uma filial e marca os títulos elegíveis como Disponível.
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param cFilTit, character, filial dos títulos
 @param cBanco, character, banco do risco sacado
+@param aForn, array, {fornecedor, loja} do banco
 @param aRecnos, array, R_E_C_N_O_ dos títulos da filial
 @param aLog, array, log de processamento (por referência)
 @return logical, .T. quando ao menos um título foi gravado
 /*/
-Static Function ProcessaLote(cFilTit as character, cBanco as character, aRecnos as array, aLog as array) as logical
-    Local cLote := "" as character
-    Local nI    := 0 as numeric
-    Local nOk   := 0 as numeric
+Static Function ProcessaLote(cFilTit as character, cBanco as character, aForn as array, aRecnos as array, aLog as array) as logical
+    Local cLote   := "" as character
+    Local cMotivo := "" as character
+    Local nI      := 0 as numeric
+    Local nOk     := 0 as numeric
 
     cLote := ProximoLote(cFilTit)
 
     Begin Transaction
         For nI := 1 To Len(aRecnos)
-            SE1->(DbGoTo(aRecnos[nI]))
-            If SE1->(Eof()) .Or. SE1->E1_XRISCO == RS_RISCO_SIM .Or. SE1->E1_SALDO <= 0
-                aAdd(aLog, ChaveTitulo() + ": título alterado por outro processo, não incluído no lote.")
+            SE2->(DbGoTo(aRecnos[nI]))
+            cMotivo := U_PXRSValidaElegivel(aForn[1], aForn[2])
+            If !Empty(cMotivo)
+                aAdd(aLog, ChaveTitulo() + ": " + cMotivo)
                 Loop
             EndIf
-            RecLock("SE1", .F.)
-            SE1->E1_XLOTRS  := cLote
-            SE1->E1_XBANCO  := cBanco
-            SE1->E1_XRISCO  := RS_RISCO_SIM
-            SE1->E1_XDTRISC := dDataBase
-            SE1->E1_XSTRIC  := RS_ENVIADO
-            SE1->(MsUnlock())
+            RecLock("SE2", .F.)
+            SE2->E2_XLOTRS  := cLote
+            SE2->E2_XBANCO  := cBanco
+            SE2->E2_XRISCO  := RS_RISCO_SIM
+            SE2->E2_XDTRISC := dDataBase
+            SE2->E2_XSTRIC  := RS_DISPONIVEL
+            SE2->(MsUnlock())
             nOk++
         Next nI
     End Transaction
 
     If nOk > 0
         ConfirmSX8()
-        aAdd(aLog, "Filial " + AllTrim(cFilTit) + ": lote " + cLote + " gerado com " + cValToChar(nOk) + " título(s).")
+        aAdd(aLog, "Filial " + AllTrim(cFilTit) + ": lote " + cLote + " gerado com " + cValToChar(nOk) + " título(s) disponível(is).")
         U_PXRSLog("INFO", "Lote de risco sacado " + cLote + " filial " + AllTrim(cFilTit) + " banco " + AllTrim(cBanco) + ;
                           " - " + cValToChar(nOk) + " título(s) - usuário " + AllTrim(UsrRetName(RetCodUsr())))
     Else
@@ -558,27 +568,27 @@ Return nOk > 0
 
 /*/{Protheus.doc} ProximoLote
 Obtém o próximo código de lote (6 dígitos) garantindo que não exista na filial.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param cFilTit, character, filial dos títulos
 @return character, código do lote
 /*/
 Static Function ProximoLote(cFilTit as character) as character
     Local cLote := "" as character
 
-    cLote := GetSXENum("SE1", "E1_XLOTRS")
+    cLote := GetSXENum("SE2", "E2_XLOTRS")
     While LoteExiste(cFilTit, cLote)
         ConfirmSX8()
-        cLote := GetSXENum("SE1", "E1_XLOTRS")
+        cLote := GetSXENum("SE2", "E2_XLOTRS")
     EndDo
 Return cLote
 
 /*/{Protheus.doc} LoteExiste
 Verifica se o código de lote já foi usado na filial.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param cFilTit, character, filial
 @param cLote, character, código do lote
 @return logical, .T. quando já existe
@@ -589,10 +599,10 @@ Static Function LoteExiste(cFilTit as character, cLote as character) as logical
     Local oStatement as object
 
     cQuery := "SELECT COUNT(*) QTD "
-    cQuery += "  FROM " + RetSqlName("SE1") + " SE1 "
-    cQuery += " WHERE SE1.D_E_L_E_T_ = ? "
-    cQuery += "   AND SE1.E1_FILIAL = ? "
-    cQuery += "   AND SE1.E1_XLOTRS = ? "
+    cQuery += "  FROM " + RetSqlName("SE2") + " SE2 "
+    cQuery += " WHERE SE2.D_E_L_E_T_ = ? "
+    cQuery += "   AND SE2.E2_FILIAL = ? "
+    cQuery += "   AND SE2.E2_XLOTRS = ? "
 
     oStatement := FWExecStatement():New(ChangeQuery(cQuery))
     oStatement:SetString(1, " ")
@@ -603,37 +613,22 @@ Static Function LoteExiste(cFilTit as character, cLote as character) as logical
     oStatement := Nil
 Return ValType(xQtd) == "N" .And. xQtd > 0
 
-/*/{Protheus.doc} AcaoSituacao
-Altera a situação de risco sacado dos títulos marcados.
-  RS_NAO_PAGO / RS_PAGO : a partir de "Enviado ao Banco".
-  RS_ENVIADO (estorno)  : a partir de "Não pago" ou "Pago", sem baixa após o envio e sem SE2 gerado.
-@type function
+/*/{Protheus.doc} AcaoAntecipado
+Ação "Antecipado" (1 -> 2): para cada título marcado, baixa o título do fornecedor e gera o
+título a pagar do banco (U_PXRSAntecipa). Cada título tem a sua transação: um erro desfaz só o título.
+Somente títulos da filial logada (ExecAuto roda na filial corrente; cFilAnt não é trocado).
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param oMark, object, FWMarkBrowse
 @param aPar, array, respostas dos parâmetros (ParamBox)
-@param cNovo, character, nova situação
 @return logical, .T. quando processado
 /*/
-Static Function AcaoSituacao(oMark as object, aPar as array, cNovo as character) as logical
-    Local aSel     := {} as array
-    Local aLog     := {} as array
-    Local aOrigem  := {} as array
-    Local cAcao    := "" as character
-    Local cMotivo  := "" as character
-    Local nI       := 0 as numeric
-    Local nOk      := 0 as numeric
-
-    If cNovo == RS_ENVIADO
-        aOrigem := {RS_NAO_PAGO, RS_PAGO}
-        cAcao   := "Estornar Situação (voltar para 'Enviado ao Banco')"
-    ElseIf cNovo == RS_NAO_PAGO
-        aOrigem := {RS_ENVIADO}
-        cAcao   := "Não Pago ao Banco"
-    Else
-        aOrigem := {RS_ENVIADO}
-        cAcao   := "Pago ao Banco"
-    EndIf
+Static Function AcaoAntecipado(oMark as object, aPar as array) as logical
+    Local aSel := {} as array
+    Local aLog := {} as array
+    Local nOk  := 0 as numeric
+    Local jCfg as json
 
     aSel := ColetaMarcados(oMark)
     If Empty(aSel)
@@ -641,63 +636,189 @@ Static Function AcaoSituacao(oMark as object, aPar as array, cNovo as character)
         Return .F.
     EndIf
 
-    If !MsgYesNo("Confirma '" + cAcao + "' para " + cValToChar(Len(aSel)) + " título(s)?", RS_TITULO)
+    If !MsgYesNo("Confirma 'Antecipado' para " + cValToChar(Len(aSel)) + " título(s)?" + CRLF + ;
+                 "O título do fornecedor será baixado e será gerado um título a pagar para o banco.", RS_TITULO)
+        Return .F.
+    EndIf
+
+    // Parâmetros lidos uma única vez, fora do laço
+    jCfg := U_PXRSConfig()
+
+    FWMsgRun(, {|| nOk := ProcessaAntecipacao(aSel, jCfg, aLog)}, RS_TITULO, "Antecipando títulos...")
+
+    aAdd(aLog, "Antecipado: " + cValToChar(nOk) + " de " + cValToChar(Len(aSel)) + " título(s) processado(s).")
+    MostraLog(aLog)
+    Recarrega(oMark, aPar)
+Return .T.
+
+/*/{Protheus.doc} ProcessaAntecipacao
+Processa a antecipação dos títulos selecionados (sem interface; mensagens no log).
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param aSel, array, títulos marcados
+@param jCfg, json, parâmetros lidos por U_PXRSConfig
+@param aLog, array, log de processamento (por referência)
+@return numeric, quantidade de títulos antecipados
+/*/
+Static Function ProcessaAntecipacao(aSel as array, jCfg as json, aLog as array) as numeric
+    Local cMsg := "" as character
+    Local nI   := 0 as numeric
+    Local nOk  := 0 as numeric
+
+    For nI := 1 To Len(aSel)
+        SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
+        If aSel[nI][MRK_FILIAL] <> xFilial("SE2")
+            aAdd(aLog, ChaveTitulo() + ": título de outra filial. Acesse a filial " + AllTrim(aSel[nI][MRK_FILIAL]) + " para antecipar.")
+            Loop
+        EndIf
+        cMsg := U_PXRSAntecipa(aSel[nI][MRK_RECNO], jCfg)
+        SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
+        If Empty(cMsg)
+            nOk++
+        Else
+            aAdd(aLog, ChaveTitulo() + ": " + cMsg)
+        EndIf
+    Next nI
+Return nOk
+
+/*/{Protheus.doc} AcaoEmAberto
+Ação "Em aberto" (1 -> 3): o fornecedor não antecipou; o título volta ao fluxo normal.
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param oMark, object, FWMarkBrowse
+@param aPar, array, respostas dos parâmetros (ParamBox)
+@return logical, .T. quando processado
+/*/
+Static Function AcaoEmAberto(oMark as object, aPar as array) as logical
+    Local aSel := {} as array
+    Local aLog := {} as array
+    Local nI   := 0 as numeric
+    Local nOk  := 0 as numeric
+
+    aSel := ColetaMarcados(oMark)
+    If Empty(aSel)
+        FWAlertWarning("Nenhum título marcado.", RS_TITULO)
+        Return .F.
+    EndIf
+
+    If !MsgYesNo("Confirma 'Em aberto' para " + cValToChar(Len(aSel)) + " título(s)?" + CRLF + ;
+                 "Os títulos voltarão ao fluxo normal do Contas a Pagar.", RS_TITULO)
         Return .F.
     EndIf
 
     Begin Transaction
         For nI := 1 To Len(aSel)
-            SE1->(DbGoTo(aSel[nI][MRK_RECNO]))
-            cMotivo := ValidaSituacao(aOrigem, cNovo)
-            If !Empty(cMotivo)
-                aAdd(aLog, ChaveTitulo() + ": " + cMotivo)
+            SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
+            If SE2->(Eof()) .Or. SE2->E2_XRISCO <> RS_RISCO_SIM .Or. SE2->E2_XSTRIC <> RS_DISPONIVEL
+                aAdd(aLog, ChaveTitulo() + ": somente títulos 'Disponível' podem ir para 'Em aberto'.")
                 Loop
             EndIf
-            RecLock("SE1", .F.)
-            SE1->E1_XSTRIC := cNovo
-            SE1->(MsUnlock())
+            RecLock("SE2", .F.)
+            SE2->E2_XSTRIC := RS_EM_ABERTO
+            SE2->(MsUnlock())
             nOk++
         Next nI
     End Transaction
 
-    aAdd(aLog, cAcao + ": " + cValToChar(nOk) + " título(s) atualizado(s).")
-    U_PXRSLog("INFO", cAcao + ": " + cValToChar(nOk) + " título(s) - usuário " + AllTrim(UsrRetName(RetCodUsr())))
+    aAdd(aLog, "Em aberto: " + cValToChar(nOk) + " título(s) atualizado(s).")
+    U_PXRSLog("INFO", "Em aberto: " + cValToChar(nOk) + " título(s) - usuário " + AllTrim(UsrRetName(RetCodUsr())))
     MostraLog(aLog)
     Recarrega(oMark, aPar)
 Return .T.
 
-/*/{Protheus.doc} ValidaSituacao
-Valida a mudança de situação do título posicionado na SE1.
-@type function
+/*/{Protheus.doc} AcaoEstorno
+Ação "Estornar Situação":
+  3 -> 1 : somente sem baixa e fora de borderô (título não movimentado após o envio).
+  2 -> 1 : exclui o título do banco e cancela a baixa do fornecedor (U_PXRSEstornaAntecipacao),
+           somente na filial logada e com o título do banco sem baixa e fora de borderô.
+@type static function
 @author bacoetrom
-@since 13/10/2026
-@param aOrigem, array, situações de origem permitidas
-@param cNovo, character, nova situação
-@return character, motivo da rejeição ou vazio quando permitido
+@since 19/10/2026
+@param oMark, object, FWMarkBrowse
+@param aPar, array, respostas dos parâmetros (ParamBox)
+@return logical, .T. quando processado
 /*/
-Static Function ValidaSituacao(aOrigem as array, cNovo as character) as character
-    Local cMotivo := "" as character
+Static Function AcaoEstorno(oMark as object, aPar as array) as logical
+    Local aSel := {} as array
+    Local aLog := {} as array
+    Local nOk  := 0 as numeric
 
-    If SE1->(Eof()) .Or. SE1->E1_XRISCO <> RS_RISCO_SIM
-        cMotivo := "título não está em risco sacado."
-    ElseIf aScan(aOrigem, SE1->E1_XSTRIC) == 0
-        cMotivo := "situação atual '" + U_PXRSDescSituacao(SE1->E1_XRISCO, SE1->E1_XSTRIC) + "' não permite esta operação."
-    ElseIf SE1->E1_SALDO <= 0
-        cMotivo := "título já baixado."
-    ElseIf cNovo == RS_ENVIADO .And. !Empty(SE1->E1_BAIXA) .And. SE1->E1_BAIXA >= SE1->E1_XDTRISC
-        cMotivo := "título possui baixa após o envio ao banco."
-    ElseIf cNovo == RS_ENVIADO .And. SE1->E1_XSTRIC == RS_NAO_PAGO .And. ;
-           U_PXRSBuscaPagar(SE1->E1_FILIAL, U_PXRSChaveOrigem()) > 0
-        cMotivo := "já existe título a pagar de risco sacado gerado."
+    aSel := ColetaMarcados(oMark)
+    If Empty(aSel)
+        FWAlertWarning("Nenhum título marcado.", RS_TITULO)
+        Return .F.
     EndIf
-Return cMotivo
+
+    If !MsgYesNo("Confirma 'Estornar Situação' (voltar para 'Disponível') para " + cValToChar(Len(aSel)) + " título(s)?" + CRLF + ;
+                 "Títulos antecipados terão o título do banco excluído e a baixa cancelada.", RS_TITULO)
+        Return .F.
+    EndIf
+
+    FWMsgRun(, {|| nOk := ProcessaEstorno(aSel, aLog)}, RS_TITULO, "Estornando situação...")
+
+    aAdd(aLog, "Estornar Situação: " + cValToChar(nOk) + " de " + cValToChar(Len(aSel)) + " título(s) estornado(s).")
+    U_PXRSLog("INFO", "Estornar Situação: " + cValToChar(nOk) + " título(s) - usuário " + AllTrim(UsrRetName(RetCodUsr())))
+    MostraLog(aLog)
+    Recarrega(oMark, aPar)
+Return .T.
+
+/*/{Protheus.doc} ProcessaEstorno
+Processa o estorno de situação dos títulos selecionados (sem interface; mensagens no log).
+@type static function
+@author bacoetrom
+@since 19/10/2026
+@param aSel, array, títulos marcados
+@param aLog, array, log de processamento (por referência)
+@return numeric, quantidade de títulos estornados
+/*/
+Static Function ProcessaEstorno(aSel as array, aLog as array) as numeric
+    Local cMsg := "" as character
+    Local nI   := 0 as numeric
+    Local nOk  := 0 as numeric
+
+    For nI := 1 To Len(aSel)
+        SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
+        cMsg := ""
+
+        If SE2->(Eof()) .Or. SE2->E2_XRISCO <> RS_RISCO_SIM
+            cMsg := "título não está em risco sacado."
+        ElseIf SE2->E2_XSTRIC == RS_DISPONIVEL
+            cMsg := "título já está 'Disponível'."
+        ElseIf SE2->E2_XSTRIC == RS_EM_ABERTO
+            If SE2->E2_SALDO < SE2->E2_VALOR - RS_TOLERANCIA
+                cMsg := "título 'Em aberto' possui baixa após o envio ao banco."
+            ElseIf !Empty(SE2->E2_NUMBOR)
+                cMsg := "título 'Em aberto' está no borderô " + AllTrim(SE2->E2_NUMBOR) + "."
+            Else
+                Begin Transaction
+                    RecLock("SE2", .F.)
+                    SE2->E2_XSTRIC := RS_DISPONIVEL
+                    SE2->(MsUnlock())
+                End Transaction
+            EndIf
+        ElseIf SE2->E2_XSTRIC == RS_ANTECIPADO
+            cMsg := U_PXRSEstornaAntecipacao(aSel[nI][MRK_RECNO])
+        Else
+            cMsg := "situação atual não permite estorno."
+        EndIf
+
+        SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
+        If Empty(cMsg)
+            nOk++
+        Else
+            aAdd(aLog, ChaveTitulo() + ": " + cMsg)
+        EndIf
+    Next nI
+Return nOk
 
 /*/{Protheus.doc} AcaoExcluirLote
 Exclui os lotes dos títulos marcados, devolvendo todos os títulos do lote para "sem risco".
-Permitido somente se nenhum título do lote tiver baixa após o envio ou SE2 gerado.
-@type function
+Permitido somente se nenhum título do lote estiver Antecipado ou movimentado após o envio.
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param oMark, object, FWMarkBrowse
 @param aPar, array, respostas dos parâmetros (ParamBox)
 @return logical, .T. quando processado
@@ -734,12 +855,15 @@ Static Function AcaoExcluirLote(oMark as object, aPar as array) as logical
         aRecnos := TitulosDoLote(aLotes[nI][1], aLotes[nI][2])
         cMotivo := ""
         For nJ := 1 To Len(aRecnos)
-            SE1->(DbGoTo(aRecnos[nJ]))
-            If SE1->E1_SALDO <= 0 .Or. (!Empty(SE1->E1_BAIXA) .And. SE1->E1_BAIXA >= SE1->E1_XDTRISC)
+            SE2->(DbGoTo(aRecnos[nJ]))
+            If SE2->E2_XSTRIC == RS_ANTECIPADO
+                cMotivo := ChaveTitulo() + " está Antecipado. Estorne a antecipação antes."
+                Exit
+            ElseIf SE2->E2_SALDO < SE2->E2_VALOR - RS_TOLERANCIA
                 cMotivo := ChaveTitulo() + " possui baixa após o envio ao banco."
                 Exit
-            ElseIf SE1->E1_XSTRIC == RS_NAO_PAGO .And. U_PXRSBuscaPagar(SE1->E1_FILIAL, U_PXRSChaveOrigem()) > 0
-                cMotivo := ChaveTitulo() + " possui título a pagar de risco sacado gerado."
+            ElseIf !Empty(SE2->E2_NUMBOR)
+                cMotivo := ChaveTitulo() + " está no borderô " + AllTrim(SE2->E2_NUMBOR) + "."
                 Exit
             EndIf
         Next nJ
@@ -751,14 +875,15 @@ Static Function AcaoExcluirLote(oMark as object, aPar as array) as logical
 
         Begin Transaction
             For nJ := 1 To Len(aRecnos)
-                SE1->(DbGoTo(aRecnos[nJ]))
-                RecLock("SE1", .F.)
-                SE1->E1_XLOTRS  := Space(TamSX3("E1_XLOTRS")[1])
-                SE1->E1_XBANCO  := Space(TamSX3("E1_XBANCO")[1])
-                SE1->E1_XDTRISC := CtoD("")
-                SE1->E1_XSTRIC  := Space(TamSX3("E1_XSTRIC")[1])
-                SE1->E1_XRISCO  := RS_RISCO_NAO
-                SE1->(MsUnlock())
+                SE2->(DbGoTo(aRecnos[nJ]))
+                RecLock("SE2", .F.)
+                SE2->E2_XLOTRS  := Space(TamSX3("E2_XLOTRS")[1])
+                SE2->E2_XBANCO  := Space(TamSX3("E2_XBANCO")[1])
+                SE2->E2_XDTRISC := CtoD("")
+                SE2->E2_XDTANT  := CtoD("")
+                SE2->E2_XSTRIC  := Space(TamSX3("E2_XSTRIC")[1])
+                SE2->E2_XRISCO  := RS_RISCO_NAO
+                SE2->(MsUnlock())
             Next nJ
         End Transaction
 
@@ -774,12 +899,12 @@ Return .T.
 
 /*/{Protheus.doc} TitulosDoLote
 Retorna os R_E_C_N_O_ de todos os títulos de um lote.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param cFilTit, character, filial
 @param cLote, character, código do lote
-@return array, R_E_C_N_O_ da SE1
+@return array, R_E_C_N_O_ da SE2
 /*/
 Static Function TitulosDoLote(cFilTit as character, cLote as character) as array
     Local aRecnos    := {} as array
@@ -787,20 +912,22 @@ Static Function TitulosDoLote(cFilTit as character, cLote as character) as array
     Local cAliasQry  := "" as character
     Local oStatement as object
 
-    cQuery := "SELECT SE1.R_E_C_N_O_ RECSE1 "
-    cQuery += "  FROM " + RetSqlName("SE1") + " SE1 "
-    cQuery += " WHERE SE1.D_E_L_E_T_ = ? "
-    cQuery += "   AND SE1.E1_FILIAL = ? "
-    cQuery += "   AND SE1.E1_XLOTRS = ? "
+    cQuery := "SELECT SE2.R_E_C_N_O_ RECSE2 "
+    cQuery += "  FROM " + RetSqlName("SE2") + " SE2 "
+    cQuery += " WHERE SE2.D_E_L_E_T_ = ? "
+    cQuery += "   AND SE2.E2_FILIAL = ? "
+    cQuery += "   AND SE2.E2_XLOTRS = ? "
+    cQuery += "   AND SE2.E2_XORIRS = ? "
 
     oStatement := FWExecStatement():New(ChangeQuery(cQuery))
     oStatement:SetString(1, " ")
     oStatement:SetString(2, cFilTit)
     oStatement:SetString(3, cLote)
+    oStatement:SetString(4, Space(TamSX3("E2_XORIRS")[1]))
     cAliasQry := oStatement:OpenAlias(GetNextAlias())
 
     While !(cAliasQry)->(Eof())
-        aAdd(aRecnos, (cAliasQry)->RECSE1)
+        aAdd(aRecnos, (cAliasQry)->RECSE2)
         (cAliasQry)->(DbSkip())
     EndDo
 
@@ -811,9 +938,9 @@ Return aRecnos
 
 /*/{Protheus.doc} Recarrega
 Recarrega a tabela temporária após uma ação e atualiza o browse.
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param oMark, object, FWMarkBrowse
 @param aPar, array, respostas dos parâmetros (ParamBox)
 @return logical, sempre .T.
@@ -835,21 +962,21 @@ Static Function Recarrega(oMark as object, aPar as array) as logical
 Return .T.
 
 /*/{Protheus.doc} ChaveTitulo
-Identificação do título posicionado na SE1 para mensagens.
-@type function
+Identificação do título posicionado na SE2 para mensagens.
+@type static function
 @author bacoetrom
-@since 13/10/2026
-@return character, filial/prefixo/número/parcela/tipo
+@since 19/10/2026
+@return character, filial/prefixo/número/parcela/tipo/fornecedor
 /*/
 Static Function ChaveTitulo() as character
-Return "Título " + AllTrim(SE1->E1_FILIAL) + "/" + AllTrim(SE1->E1_PREFIXO) + "/" + AllTrim(SE1->E1_NUM) + ;
-       "/" + AllTrim(SE1->E1_PARCELA) + "/" + AllTrim(SE1->E1_TIPO)
+Return "Título " + AllTrim(SE2->E2_FILIAL) + "/" + AllTrim(SE2->E2_PREFIXO) + "/" + AllTrim(SE2->E2_NUM) + ;
+       "/" + AllTrim(SE2->E2_PARCELA) + "/" + AllTrim(SE2->E2_TIPO) + " forn. " + AllTrim(SE2->E2_FORNECE)
 
 /*/{Protheus.doc} MostraLog
 Exibe o resumo do processamento (limitado a RS_MAX_LOG linhas; todas vão para o log do servidor).
-@type function
+@type static function
 @author bacoetrom
-@since 13/10/2026
+@since 19/10/2026
 @param aLog, array, mensagens
 @return logical, sempre .T.
 /*/
