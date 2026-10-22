@@ -189,7 +189,7 @@ user function TFin0001(cDevice, aParam)
 
 	oBrowse:AddButton('Filtrar'                     , {|| onFilter()},, 6,)
 	oBrowse:AddButton('Imprimir Boleto'             , {|| onPrinter(cDevice)},, 6,)
-	//oBrowse:AddButton('Enviar Boleto por E-mail'    , {|| onSendMail()},, 6,)
+	oBrowse:AddButton('Enviar Boleto por E-mail'    , {|| onSendMail()},, 6,)
 	//oBrowse:AddButton('Geração de Nosso Número'     , {|| onGenerate()},, 6,)
 	oBrowse:AddButton('Marcar Todos'                , {|| onMarkAll(.t.)},, 6,)
 	oBrowse:AddButton('Desmarcar Todos'             , {|| onMarkAll(.f.)},, 6,)
@@ -796,6 +796,58 @@ return
 
 
 //-------------------------------------------------------------------
+/*/{Protheus.doc} syncMarked
+Sincroniza aData com os títulos marcados no browse (campo E1_OK).
+Se o filtro já foi executado (cFilter), atualiza a marcação dos itens carregados;
+caso contrário, carrega os títulos da filial marcados com a marca do browse.
+@author pablo.regis
+@since 22/10/2026
+@version 1.0
+@type function
+/*/
+//-------------------------------------------------------------------
+static function syncMarked()
+	local areaSE1 := SE1->(getArea())
+	local cMark   := oBrowse:Mark()
+	local cQuery  := ''
+	local nRow    := 0
+
+	if !empty(cFilter)		//Filtro executado: aData já contém os títulos do browse
+		dbSelectArea('SE1')
+
+		for nRow := 1 to len(aData)
+			SE1->(dbGoTo(aData[nRow, 1]))
+
+			aData[nRow, 2] := (!SE1->(eof()) .and. SE1->E1_OK == cMark)
+		next nRow
+	else
+		aData := {}
+
+		cQuery := "SELECT SE1.R_E_C_N_O_ AS RECNO "
+		cQuery += "FROM " + retSqlName('SE1') + " SE1 "
+		cQuery += "WHERE SE1.D_E_L_E_T_ = ' ' "
+		cQuery += "  AND SE1.E1_FILIAL  = '" + xFilial('SE1') + "' "
+		cQuery += "  AND SE1.E1_OK      = '" + cMark + "' "
+		cQuery += "  AND SE1.E1_SALDO   > 0 "
+		cQuery += "ORDER BY SE1.R_E_C_N_O_"
+
+		cQuery := changeQuery(cQuery)
+		tcQuery cQuery new alias "qMRK"
+
+		do while !qMRK->(eof())
+			aAdd(aData, {qMRK->RECNO, .t.})
+
+			qMRK->(dbSkip())
+		endDo
+
+		qMRK->(dbCloseArea())
+	endIf
+
+	restArea(areaSE1)
+return
+
+
+//-------------------------------------------------------------------
 /*/{Protheus.doc} onSendMail
 Gatilho para envio de e-mail dos boletos gerados 
 @author odair.batista
@@ -805,9 +857,18 @@ Gatilho para envio de e-mail dos boletos gerados
 /*/
 //-------------------------------------------------------------------
 static function onSendMail()
+	syncMarked()			//Atualiza aData com as marcas gravadas pelo browse (E1_OK)
+
 	aMark := sumMark()
 
 	oAlerts:Empty()
+
+	if aMark[1] == 0
+		oAlerts:Add('onSendMail' ;
+			, 'Nenhum título selecionado!' ;
+			, 'E' ;
+			, 'Marque os títulos desejados no browse e clique novamente em "Enviar Boleto por E-mail".')
+	endIf
 
 	if aMark[2] > 2000
 		oAlerts:Add('onSendMail' ;
@@ -1318,6 +1379,8 @@ static function toSend(cCliente, cLoja, aAttach)
 	local cInstru1
 	local cInstru2
 	local cInstru3
+	local cBody     := ''
+	local cFileName := ''
 
 	oHelper:Empty()
 
@@ -1416,41 +1479,46 @@ static function toSend(cCliente, cLoja, aAttach)
 			cInstru3 := '3 - Descompacte seus boletos' + iIf(!isPasswd, "", " (Senha: 5 primeiros dígitos do seu " + cNomDocto + ")")
 		endIf
 
-		oMail := tcPMail():New()
-
-		oMail:SetTo(allTrim(SA1->A1_UEMAIL))
-		oMail:SetSubject("Boletos Bancários")
-		oMail:SetHeader('CLIENTE: ' + allTrim(SA1->A1_NOME) + ' (' + alltrim(SA1->A1_COD) + ', ' + allTrim(SA1->A1_LOJA) + ')' ;
-			, cDesDocto + cDigDocto ;
-			, 'EMITIDO EM ' + dToC(date()) + ' AS ' + time() ;
-			, cInstru1 ;
-			, cInstru2 ;
-			, cInstru3)
-
-		oMail:SetTitle('WORKFLOW - GERAÇÃO DE BOLETOS BANCÁRIOS')
-
-		oMail:AddTableSection('Documentos Gerados', 1)
-
-		oMail:Section():SetHeader(1, 'NOME DOS ARQUIVOS')
-		oMail:Section():SetAlignColumn(1, 'LEFT')
-		oMail:Section():SetWidthColumn(1, 80)
+		//Corpo do e-mail em HTML (substitui a classe tcPMail, que não existe no projeto)
+		cBody := '<html><body style="font-family: Arial, Helvetica, sans-serif; font-size: 12px;">'
+		cBody += '<h3>WORKFLOW - GERAÇÃO DE BOLETOS BANCÁRIOS</h3>'
+		cBody += '<p><b>CLIENTE:</b> ' + allTrim(SA1->A1_NOME) + ' (' + allTrim(SA1->A1_COD) + ', ' + allTrim(SA1->A1_LOJA) + ')<br>'
+		cBody += cDesDocto + cDigDocto + '<br>'
+		cBody += 'EMITIDO EM ' + dToC(date()) + ' AS ' + time() + '</p>'
+		cBody += '<p>' + allTrim(cInstru1) + '<br>' + allTrim(cInstru2) + '<br>' + allTrim(cInstru3) + '</p>'
+		cBody += '<p><b>Documentos Gerados</b></p>'
+		cBody += '<ul>'
 
 		for nRow := 1 to len(aAttach)
-			oMail:Section():AddObject()
-			oMail:Section():Object():AddItem(U_tcBrkFile(allTrim(aAttach[nRow]), 'File'))
+			cFileName := allTrim(aAttach[nRow])
+			cFileName := subStr(cFileName, rat('\', cFileName) + 1)
 
+			cBody += '<li>' + cFileName + '</li>'
+		next nRow
+
+		cBody += '</ul>'
+		cBody += '</body></html>'
+
+		oMail := tcEMail():New()
+
+		oMail:SetTo(allTrim(SA1->A1_UEMAIL))
+		oMail:SetSubject('Boletos Bancários')
+		oMail:SetBody(cBody)
+
+		for nRow := 1 to len(aAttach)
 			oMail:Attach(aAttach[nRow])
 		next nRow
 
-		/*
-		Métodos usados somente para debugar o fonte
-		
-		oMail:SetDebug(.t.)
-		oMail:SetShowToLog(.t.)
-		*/
+		if !oMail:Send()
+			oHelper:Add('toSend' ;
+				, 'E-mail não enviado!' ;
+				, 'E' ;
+				, 'Não foi possível enviar o e-mail para o cliente com código <' + allTrim(cCliente) ;
+				+ '> e loja <' + allTrim(cLoja) + '> (' + allTrim(SA1->A1_UEMAIL) + '). ' ;
+				+ 'Motivo: ' + oMail:GetLastError() + '. ' ;
+				+ 'Verifique os parâmetros MV_RELSERV, MV_RELACNT, MV_RELPSW, MV_RELFROM e MV_RELAUTH.')
+		endIf
 
-		oMail:Generate()		//O método Generate() já executa o método setBody()
-		oMail:Send()
 		oMail:Destroy()
 	endIf
 

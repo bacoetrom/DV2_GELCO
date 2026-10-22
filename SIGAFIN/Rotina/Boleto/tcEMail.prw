@@ -44,6 +44,7 @@ class tcEMail from LongClassName
     data lAuth       as boolean hidden
     data nTypeFrom   as integer hidden
     data attachOnSrv as boolean hidden
+    data cLastError  as string  hidden
 	
 	method New() constructor
 	method ClassName()
@@ -94,6 +95,7 @@ class tcEMail from LongClassName
 	
 	method Attach(cAttach)
 	method Send()
+	method GetLastError()
 endClass               
 
                    
@@ -132,10 +134,17 @@ method New() class tcEMail
 	::lDebug      := .f.									//Por padrão não mostra mensagens
 	::lAuth       := superGetMV("MV_E_AUTH", .f., "",)	//Por padrão não faz autenticação - Pode ser parametrizado no sistema
 	::attachOnSrv := .f.
+	::cLastError  := ''
 
 	//Forçar para pegar dados de servidor e autenticação do padrão Protheus
 	::cServer   := superGetMv('MV_RELSERV', .f., '',)
 	::nPort     := iIf(at(':', ::cServer) > 0, val(subStr(::cServer, (at(':', ::cServer) + 1), len(::cServer))), 587)
+
+	//MV_RELSERV pode vir como servidor:porta - a porta já foi extraída acima
+	if at(':', ::cServer) > 0
+		::cServer := subStr(::cServer, 1, at(':', ::cServer) - 1)
+	endIf
+
 	::cUser     := superGetMv('MV_RELACNT', .f., '',)
 	::cPasswd   := superGetMv('MV_RELPSW' , .f., '',)
 	::cFrom     := superGetMv('MV_RELFROM', .f., '',)
@@ -150,13 +159,15 @@ method New() class tcEMail
 		::nSecurity := 2
 	endIf
 
-	if empty(::nTypeFrom) ;
-		.or. ::nTypeFrom < 1 ;
-		.or. ::nTypeFrom > 3 ;
-		.or. valType(::nTypeFrom) <> 'N'
-		 
-		::nTimeOut := 3		//Padrão
-	endIf 
+	if valType(::nTypeFrom) <> 'N'
+		::nTypeFrom := val(cValToChar(::nTypeFrom))
+	endIf
+
+	if ::nTypeFrom < 1 ;
+		.or. ::nTypeFrom > 3
+
+		::nTypeFrom := 1		//Padrão (MV_E_TYPE inexistente ou inválido)
+	endIf
 
 	if ::nTypeFrom <> 1 
 		//INICIO: Pegar email do usuário solicitante
@@ -867,6 +878,18 @@ method Attach(cAttach) class tcEMail
 return                                   
 
 
+/*/{Protheus.doc} tcEMail:GetLastError
+Retorna a descrição do último erro ocorrido no método Send()
+@author pablo.regis
+@since 22/10/2026
+@version 1.0
+@type method
+@return caractere, descrição do erro (vazio se não houve erro)
+/*/
+method GetLastError() class tcEMail
+return ::cLastError
+
+
 /*/{Protheus.doc} tcEMail:Send
 Método para enviar o EMail 
 @author Odair Batista - odair.batista@gmail.com
@@ -886,6 +909,8 @@ method Send() class tcEMail
 	local nRow       := 0
 	local fullName   := ""
 	local nAttempt   := 3
+
+	::cLastError := ''
 
 	//Apos a conexão, cria o objeto da mensagem
 	oMessage := TMailMessage():New()
@@ -936,6 +961,10 @@ method Send() class tcEMail
 		endIf
 	next nRow
 
+	if nError <> 0
+		::cLastError := 'Falha ao anexar o arquivo ' + fullName
+	endIf
+
 	if nError == 0
 		//Instancia objeto para conexão com o servidor
 		oServer := tMailManager():New()
@@ -968,6 +997,11 @@ method Send() class tcEMail
 				sleep(1000)
 			endIf 
 		next nRow
+
+		if nError <> 0
+			::cLastError := 'Falha ao conectar no servidor ' + ::cServer + ':' + cValToChar(::nPort) ;
+				+ ' (' + allTrim(cValToChar(oServer:GetErrorString(nError))) + ')'
+		endIf
 					
 		if ::lDebug
 			isMailFail(::lShowToLog, oServer, nError, "Servidor conectado com sucesso", "Não foi possível Conectar ao servidor")	
@@ -977,6 +1011,11 @@ method Send() class tcEMail
 			.and. nError == 0
 			
 			nError := oServer:SmtpAuth(::cUser, ::cPasswd)
+
+			if nError <> 0
+				::cLastError := 'Falha na autenticação do usuário ' + ::cUser ;
+					+ ' (' + allTrim(cValToChar(oServer:GetErrorString(nError))) + ')'
+			endIf
 					
 			if ::lDebug
 				isMailFail(::lShowToLog, oServer, nError, "Autenticado com sucesso", "Falha na autenticação")	
@@ -986,6 +1025,11 @@ method Send() class tcEMail
 		if nError == 0
 		  	//Envia o e-mail
 		  	nError := oMessage:Send(oServer)
+
+			if nError <> 0
+				::cLastError := 'Falha no envio para ' + ::cTo + ' a partir de ' + ::cFrom ;
+					+ ' (' + allTrim(cValToChar(oServer:GetErrorString(nError))) + ')'
+			endIf
 		  	
 			if ::lDebug
 				isMailFail(::lShowToLog, oServer, nError, "E-Mail enviado com sucesso para " + ::cTo, "Falha ao enviar E-Mail para " + ::cTo)
@@ -1028,7 +1072,7 @@ static function isMailFail(showToLog_, oServer_, nError_, message_, failMsg_)
 			alert(message_)
 		endIf
 	else
-		if type("oServer") == "O"
+		if valType(oServer_) == "O"
 			failMsg_ += " (" + trim(cValToChar(oServer_:getErrorString(nError_))) + ")"
 		endIf
 		
