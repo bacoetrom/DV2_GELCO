@@ -1,0 +1,5 @@
+e-mail: envio@gelcointernational.com
+senha: vezar-30-Viril
+smtp.office365.com
+porta 587
+requer SSL
