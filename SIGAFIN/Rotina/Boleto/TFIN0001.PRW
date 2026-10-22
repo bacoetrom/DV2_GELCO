@@ -79,36 +79,38 @@ Função principal para chamada externa
 U_TFin0001('Printer', aParam)
 @obs
 	aParam:
-		[01] MV_PAR01: Data Emissão De    
-		[02] MV_PAR02: Data Emissão Até  
-		[03] MV_PAR03: Data Vencimento De 
-		[04] MV_PAR04: Data Vencimento Até
-		[05] MV_PAR05: Prefixo De		   
-		[06] MV_PAR06: Prefixo Até		   
-		[07] MV_PAR07: Tipo De			   
-		[08] MV_PAR08: Tipo Até		
-		[09] MV_PAR09: Número De		
-		[10] MV_PAR10: Número Até		   
-		[11] MV_PAR11: Parcela De
-		[12] MV_PAR12: Parcela Até	   	   
-		[13] MV_PAR13: Cliente De	 	   
-		[14] MV_PAR14: Loja De			   
-		[15] MV_PAR15: Cliente Até		   
-		[16] MV_PAR16: Loja Até		
-		[17] MV_PAR17: Situação
-		[18] MV_PAR18: Job (se é executado pelo Job)
+		[01] MV_PAR01: Borderô De
+		[02] MV_PAR02: Borderô Até
+		[03] MV_PAR03: Data Emissão De
+		[04] MV_PAR04: Data Emissão Até
+		[05] MV_PAR05: Data Vencimento De
+		[06] MV_PAR06: Data Vencimento Até
+		[07] MV_PAR07: Prefixo De
+		[08] MV_PAR08: Prefixo Até
+		[09] MV_PAR09: Tipo De
+		[10] MV_PAR10: Tipo Até
+		[11] MV_PAR11: Número De
+		[12] MV_PAR12: Número Até
+		[13] MV_PAR13: Parcela De
+		[14] MV_PAR14: Parcela Até
+		[15] MV_PAR15: Cliente De
+		[16] MV_PAR16: Loja De
+		[17] MV_PAR17: Cliente Até
+		[18] MV_PAR18: Loja Até
+		[19] MV_PAR19: Situação (1=Impressão, 2=Reimpressão, 3=Pendente de e-mail)
+	A execução sem interface (job) é identificada por isBlind().
 /*/
 //-------------------------------------------------------------------
 user function TFin0001(cDevice, aParam)
 	local aArea       := getArea()
 	local nRow        := 0
-	local oUser       := nil
 	local cDirSrv     := '\spool\boleto\'
 	local cDirLoc     := 'c:\totvs\boleto\'
 
 	private aData     := {}
 	private aFiles    := {}
 	private isAuto    := .f.
+	private isJob     := isBlind()		//Execução sem interface (job/schedule)
 	private oBrowse   := nil
 	private cFilter   := ''
 	private aStack    := {1,.f.,.f.}
@@ -121,19 +123,7 @@ user function TFin0001(cDevice, aParam)
 
 	default cDevice   := 'Printer'
 	default aParam    := {}
-	default isJob     := .f.
-	/*
-	//Obtem o nome do usuario logado
-	oUser := tcUser():New()
-	
-	oUser:FindByID(__cUserID)
-	
-	if oUser:Available()
-		cUserName := oUser:GetUserName()
-	endIf
 
-	oUser:Destroy()
-	
 	/* Inicio do tratamento para parâmetro de saída */
 	
 	if allTrim(cDevice) == 'Email'
@@ -164,8 +154,6 @@ user function TFin0001(cDevice, aParam)
 			&("mv_par" + strZero(nRow, 2)) := aParam[nRow]
 		next nRow
 
-		isJob := mv_par18
-
 		loadData()
 		doPrinter(cDevice)
 
@@ -179,7 +167,12 @@ user function TFin0001(cDevice, aParam)
 	oBrowse:SetDescription(cTitle)		//Setando a descrição da rotina
 	oBrowse:SetFieldMark('E1_OK')
 
-	//Adicionando legendas
+	//Adicionando legendas (status do e-mail tem prioridade quando os campos de rastreio existem)
+	if SE1->(fieldPos('E1_XSTMAIL')) > 0
+		oBrowse:AddLegend("SE1->E1_XSTMAIL == '1'", "BLUE"  , "E-mail enviado")
+		oBrowse:AddLegend("SE1->E1_XSTMAIL == '2'", "ORANGE", "Erro no envio do e-mail")
+	endIf
+
 	oBrowse:AddLegend("empty(SE1->E1_NUMBCO)" , "GREEN", "Pendente")
 	oBrowse:AddLegend("!empty(SE1->E1_NUMBCO)", "RED"  , "Impresso")
 
@@ -189,7 +182,7 @@ user function TFin0001(cDevice, aParam)
 
 	oBrowse:AddButton('Filtrar'                     , {|| onFilter()},, 6,)
 	oBrowse:AddButton('Imprimir Boleto'             , {|| onPrinter(cDevice)},, 6,)
-	//oBrowse:AddButton('Enviar Boleto por E-mail'    , {|| onSendMail()},, 6,)
+	oBrowse:AddButton('Enviar Boleto por E-mail'    , {|| onSendMail()},, 6,)
 	//oBrowse:AddButton('Geração de Nosso Número'     , {|| onGenerate()},, 6,)
 	oBrowse:AddButton('Marcar Todos'                , {|| onMarkAll(.t.)},, 6,)
 	oBrowse:AddButton('Desmarcar Todos'             , {|| onMarkAll(.f.)},, 6,)
@@ -389,7 +382,7 @@ static function sumMark()
 				nSE1 += 1
 				nVLSE1 += SE1->E1_VALOR
 
-				if !aScan(aMark, SE1->E1_CLIENTE + SE1->E1_LOJA)
+				if aScan(aMark, SE1->E1_CLIENTE + SE1->E1_LOJA) == 0
 					aAdd(aMark, SE1->E1_CLIENTE + SE1->E1_LOJA)
 					nSA1 += 1
 				endIf
@@ -603,6 +596,12 @@ static function createFilter()
 	if mv_par19 == 1
 		cFilter += " .and. SE1->E1_SITUACA <> '0' "
 		cFilter += " .and. SE1->E1_NUMBCO  == '" + cEmptyNumBco + "' "
+	elseIf mv_par19 == 3		//Pendente de e-mail: novos ou já impressos, ainda não enviados
+		cFilter += " .and. SE1->E1_SITUACA <> '0' "
+
+		if SE1->(fieldPos('E1_XSTMAIL')) > 0
+			cFilter += " .and. SE1->E1_XSTMAIL <> '1' "
+		endIf
 	else
 		cFilter += " .and. SE1->E1_NUMBCO <> '" + cEmptyNumBco + "' "
 	endIf
@@ -719,6 +718,12 @@ static function loadData()
 	if mv_par19 == 1
 		cQuery += "  AND SE1.E1_SITUACA <> '0' "
 		cQuery += "  AND SE1.E1_NUMBCO  = '" + cEmptyNumBco + "' "
+	elseIf mv_par19 == 3		//Pendente de e-mail: novos ou já impressos, ainda não enviados
+		cQuery += "  AND SE1.E1_SITUACA <> '0' "
+
+		if SE1->(fieldPos('E1_XSTMAIL')) > 0
+			cQuery += "  AND SE1.E1_XSTMAIL <> '1' "
+		endIf
 	else
 		cQuery += "  AND SE1.E1_NUMBCO <> '" + cEmptyNumBco + "' "
 	endIf
@@ -805,7 +810,8 @@ Gatilho para envio de e-mail dos boletos gerados
 /*/
 //-------------------------------------------------------------------
 static function onSendMail()
-	aMark := sumMark()
+	local aMark   := sumMark()
+	local nEnviad := 0
 
 	oAlerts:Empty()
 
@@ -822,6 +828,16 @@ static function onSendMail()
 
 	if !oAlerts:HasErrors()
 		if !isAuto
+			//Títulos marcados que já tiveram o boleto enviado por e-mail
+			nEnviad := countSent()
+
+			if nEnviad > 0 ;
+					.and. !msgYesNo(cValToChar(nEnviad) + ' título(s) marcado(s) já tiveram o boleto enviado por e-mail. ' ;
+					+ 'Deseja reenviar?', cTitle)
+
+				return
+			endIf
+
 			if !inputMail()
 				return
 			endIf
@@ -832,6 +848,37 @@ static function onSendMail()
 		doPrinter('E-mail')
 	endIf
 return
+
+
+//-------------------------------------------------------------------
+/*/{Protheus.doc} countSent
+Conta os títulos marcados que já tiveram o boleto enviado por e-mail (E1_XSTMAIL = '1')
+@author Pablo Regis
+@since 21/10/2026
+@version 1.0
+@type function
+@return nSent, numérico, quantidade de títulos marcados já enviados
+/*/
+//-------------------------------------------------------------------
+static function countSent()
+	local areaSE1 := SE1->(getArea())
+	local nRow    := 0
+	local nSent   := 0
+
+	if SE1->(fieldPos('E1_XSTMAIL')) > 0
+		for nRow := 1 to len(aData)
+			if aData[nRow, 2]
+				SE1->(dbGoTo(aData[nRow, 1]))
+
+				if !SE1->(eof()) .and. SE1->E1_XSTMAIL == '1'
+					nSent += 1
+				endIf
+			endIf
+		next nRow
+	endIf
+
+	restArea(areaSE1)
+return(nSent)
 
 
 //-------------------------------------------------------------------
@@ -1043,6 +1090,7 @@ static function doPrinter(cDevice, recno_SEE)
 	local rowid_SEE := nil
 	local isEmail   := .f.
 	local oPrint    := nil
+	local cDirOut   := ''
 
 	default cDevice   := 'Printer'
 	default recno_SEE := 0
@@ -1067,6 +1115,13 @@ static function doPrinter(cDevice, recno_SEE)
 	if cDevice == 'E-mail'
 		cDevice := 'File'
 		isEmail := .t.
+	endIf
+
+	//Para e-mail o PDF é gerado sempre no servidor (tela e job), pois o envio é feito pelo AppServer
+	if isEmail
+		cDirOut := '\spool\boleto\' + dToS(date()) + '\'
+	else
+		cDirOut := _cDirBase
 	endIf
 
 	isBcoInf := (recno_SEE <> nil .and. !empty(recno_SEE))
@@ -1124,17 +1179,26 @@ static function doPrinter(cDevice, recno_SEE)
 				endIf
 
 				if !oHelper:HasErrors() ;
-						.and. !existDir(_cDirBase)
+						.and. !existDir(cDirOut)
 
-					if !createDir(_cDirBase)
-						//Sem acesso ao disco local (ex.: SmartClient HTML/WebApp ou sem permissão): usa a pasta temporária
-						oHelper:Add('doPrinter' ;
-							, 'Diretório não pode ser criado!' ;
-							, 'A' ;
-							, 'O diretório "' + _cDirBase + '" não pode ser criado. ' ;
-							+ 'Os boletos serão gerados na pasta temporária "' + getTempPath() + '".')
+					if !createDir(cDirOut)
+						if isEmail
+							oHelper:Add('doPrinter' ;
+								, 'Diretório não pode ser criado!' ;
+								, 'E' ;
+								, 'O diretório "' + cDirOut + '" não pode ser criado no servidor. ' ;
+								+ 'Verifique as permissões da pasta \spool\ no RootPath.')
+						else
+							//Sem acesso ao disco local (ex.: SmartClient HTML/WebApp ou sem permissão): usa a pasta temporária
+							oHelper:Add('doPrinter' ;
+								, 'Diretório não pode ser criado!' ;
+								, 'A' ;
+								, 'O diretório "' + cDirOut + '" não pode ser criado. ' ;
+								+ 'Os boletos serão gerados na pasta temporária "' + getTempPath() + '".')
 
-						_cDirBase := getTempPath()
+							_cDirBase := getTempPath()
+							cDirOut   := _cDirBase
+						endIf
 					endIf
 				endIf
 
@@ -1151,9 +1215,10 @@ static function doPrinter(cDevice, recno_SEE)
 				endIf
 
 				if !oHelper:HasErrors()
-					oBoleto:SetPath(_cDirBase)	        //Indica o caminho para geração dos arquivos
+					oBoleto:SetPath(cDirOut)	        //Indica o caminho para geração dos arquivos
 					oBoleto:SetOutput(cDevice)			//Indica o dispositivo de saída ['File', 'Screen', 'Printer']
 					oBoleto:SetAssign(.t.)				//Indica se o nosso número será gravado no título e incrementado na faixa
+					oBoleto:SetServer(isEmail)			//E-mail: PDF gerado no servidor
 
 					oBoleto:Empty()
 					oBoleto:FindByRowId(SEE->(recno()))
@@ -1167,7 +1232,8 @@ static function doPrinter(cDevice, recno_SEE)
 							aAdd(aFiles ;
 								, {SE1->E1_CLIENTE ;			//Código do cliente
 								, SE1->E1_LOJA ;			//Loja do cliente
-								, oBoleto:GetFileName()})   //Nome do PDF gerado com o boleto
+								, oBoleto:GetFileName() ;   //Nome do PDF gerado com o boleto
+								, SE1->(recno())})			//Recno do título (rastreio do envio)
 						endIf
 					endIf
 
@@ -1181,15 +1247,16 @@ static function doPrinter(cDevice, recno_SEE)
 		next nRow
 	endIf
 
-	if isEmail ;
-			.and. !oAlerts:HasErrors()
-
+	//Envia os boletos gerados mesmo que algum título tenha apresentado erro (o erro fica nas mensagens)
+	if isEmail
 		doSendMail()
 	endIf
 
 	cursorArrow()
 
-	if (!isJob)
+	if isJob
+		logAlerts()		//Sem interface: mensagens vão para o log do servidor
+	else
 		oAlerts:Show()
 	endIf
 
@@ -1239,28 +1306,72 @@ return(lOk)
 
 //-------------------------------------------------------------------
 /*/{Protheus.doc} doSendMail
-Função para envio de e-mail dos boletos gerados 
+Função para envio de e-mail dos boletos gerados (um e-mail por cliente/loja)
 @author odair.batista
 @since 01/02/2018
-@version 1.0
+@version 2.0
 @type function
+@obs
+21/10/2026 - Pablo Regis: envio passa a ser feito pela classe BolMailer (TFIN0002.tlpp),
+com uma conexão SMTP por lote, anexos no servidor e rastreio no SE1.
 /*/
 //-------------------------------------------------------------------
 static function doSendMail()
 	local nRow     := 0
+	local nOk      := 0
 	local cCliente := ''
 	local cLoja    := ''
+	local cErro    := ''
 	local aAttach  := {}
+	local aInstru  := {}
+	local aRes     := {}
+	local lZip     := .f.
+	local lSenha   := .f.
+	local oMail    := nil
 
 	if empty(aFiles)
 		oAlerts:Add('doSendMail' ;
 			, 'Não existem boletos para envio!' ;
 			, 'E' ;
 			, 'Não foram gerados boletos para envio')
+
+		return
 	endIf
 
-	if !oAlerts:HasErrors()
-		aSort(aFiles,,, {|x,y,z| x[1] < y[1] .and. x[2] < y[2]})
+	//Opções de compactação: tela = perguntas do inputMail(); execução automática = parâmetros
+	if isAuto
+		lZip   := toLogic(superGetMV('MV_UZIPBOL', .f., .f.))
+		lSenha := toLogic(superGetMV('MV_UZIPPWD', .f., .f.))
+	else
+		lZip   := aStack[2]
+		lSenha := aStack[3]
+	endIf
+
+	aInstru := {allTrim(cMsg1), allTrim(cMsg2), allTrim(cMsg3)}
+
+	oMail := BolMailer():New()
+	oMail:LoadConfig()
+
+	cErro := oMail:Validate()
+
+	if empty(cErro) ;
+			.and. !oMail:Connect()
+
+		cErro := oMail:GetLastError()
+	endIf
+
+	if !empty(cErro)
+		oAlerts:Add('doSendMail' ;
+			, 'E-mails não enviados!' ;
+			, 'E' ;
+			, cErro)
+
+		//Os PDFs são gerados novamente no próximo envio
+		for nRow := 1 to len(aFiles)
+			fErase(aFiles[nRow, 3])
+		next nRow
+	else
+		aSort(aFiles,,, {|x, y| x[1] + x[2] < y[1] + y[2]})
 
 		cCliente := aFiles[1, 1]
 		cLoja    := aFiles[1, 2]
@@ -1270,194 +1381,94 @@ static function doSendMail()
 			if cCliente <> aFiles[nRow, 1] ;
 					.or. cLoja <> aFiles[nRow, 2]
 
-				toSend(cCliente, cLoja, aAttach)
+				oMail:SendCustomer(cCliente, cLoja, aAttach, lZip, lSenha, aInstru)
 
 				cCliente := aFiles[nRow, 1]
 				cLoja    := aFiles[nRow, 2]
 				aAttach  := {}
 			endIf
 
-			aAdd(aAttach, aFiles[nRow, 3])
+			aAdd(aAttach, {aFiles[nRow, 3], aFiles[nRow, 4]})
 		next nRow
 
 		if !empty(aAttach)
-			toSend(cCliente, cLoja, aAttach)
+			oMail:SendCustomer(cCliente, cLoja, aAttach, lZip, lSenha, aInstru)
 		endIf
-	endIf
-return
 
+		oMail:Disconnect()
 
-//-------------------------------------------------------------------
-/*/{Protheus.doc} toSend
-Função para gerar o e-mail ao cliente 
-@author odair.batista
-@since 01/02/2018
-@version 1.0
-@type function
-@param cCliente, caracter, código do cliente
-@param cLoja   , caracter, loja do cliente
-@param aAttach , array   , array contendo os arquivos de boletos do cliente
-@obs
-Os arquivo serão zipados para ser anexado ao e-mail
-/*/ 
-//-------------------------------------------------------------------
-static function toSend(cCliente, cLoja, aAttach)
-	local areaSA1   := SA1->(getArea())
-	local cLocal    := getTempPath()
-	local cZipFile  := ''
-	local cNomDocto := ''
-	local cDesDocto := ''
-	local cNumDocto := ''
-	local cDigDocto := ''
-	local oMail     := nil
-	local oHelper   := tcAlerts():New()
-	local nRow      := 0
-	local isZip     := iIf(!isAuto, aStack[2], superGetMV('MV_UZIPBOL', .f., "",))	//Se .t. = Compacta ; .f. = Não compacta
-	local isPasswd  := iIf(!isAuto, aStack[3], superGetMV('MV_UZIPPWD', .f., "",))	//Se .t. = Aplica senha ; .f. = Não aplica senha
-	local nZip      := 0
-	local cInstru1
-	local cInstru2
-	local cInstru3
+		aRes := oMail:GetResults()
 
-	oHelper:Empty()
-
-	dbSelectArea('SA1')
-	SA1->(dbSetOrder(1))
-
-	if !SA1->(dbSeek(xFilial('SA1') + cCliente + cLoja))
-		oHelper:Add('toSend' ;
-			, 'Cliente não encontrado!' ;
-			, 'E' ;
-			, 'Não foi possível encontrar o cliente com código <' + allTrim(cCliente) ;
-			+ '> e loja <' + allTrim(cLoja) + '>.')
-	endIf
-
-	if !oHelper:HasErrors()
-		if SA1->A1_UENVBOL == '2'
-			oHelper:Add('toSend' ;
-				, 'Cliente não recebe boleto por e-mail!' ;
-				, 'E' ;
-				, 'O cliente com código <' + allTrim(cCliente) + '> e loja <' ;
-				+ allTrim(cLoja) + '> não está parametrizado para receber boleto por e-mail.')
-		elseIf empty(SA1->A1_UEMAIL)
-			oHelper:Add('toSend' ;
-				, 'Cliente sem e-mail definido!' ;
-				, 'E' ;
-				, 'O cliente com código <' + allTrim(cCliente) + '> e loja <' ;
-				+ allTrim(cLoja) + '> não possui um e-mail definido.')
-		endIf
-	endIf
-
-	if !oHelper:HasErrors() ;
-			.and. isZip
-
-		//Zipar arquivos
-		cZipFile := cLocal + SA1->A1_CGC + '.7z'
-
-		if file(cZipFile)
-			if fErase(cZipFile) == -1
-				oHelper:Add('toSend' ;
-					, 'Arquivo ZIP já existe e não foi eliminado!' ;
-					, 'E' ;
-					, 'O cliente com código <' + allTrim(cCliente) + '> e loja <' ;
-					+ allTrim(cLoja) + '> já possui um arquivo ZIP criado ' ;
-					+ 'com o nome <' + cZipFile + '> e o mesmo não pode ser eliminado.' ;
-					+ ' Veirifique!')
+		for nRow := 1 to len(aRes)
+			if aRes[nRow, 3]
+				nOk += 1
+			else
+				oAlerts:Add('doSendMail' ;
+					, 'E-mail não enviado!' ;
+					, 'A' ;
+					, 'Cliente <' + allTrim(aRes[nRow, 1]) + '> loja <' + allTrim(aRes[nRow, 2]) + '>: ' + aRes[nRow, 4])
 			endIf
-		endIf
-
-		if !isPasswd
-			nZip := fZip(cZipFile, aAttach)
-		else
-			nZip := fZip(cZipFile, aAttach,, subStr(allTrim(SA1->A1_CGC), 1, 5))
-		endIf
-
-		if nZip <> 0
-			oHelper:Add('toSend' ;
-				, 'Arquivo ZIP não pode ser criado!' ;
-				, 'E' ;
-				, 'Não pode ser criado o arquivo ZIP <' + cZipFile + '> para o cliente ' ;
-				+ 'com código <' + allTrim(cCliente) + '> e loja <' ;
-				+ allTrim(cLoja) + '>. Veirifique!')
-		else
-			aAttach := {}
-			aAdd(aAttach, cZipFile)
-		endIf
-	endIf
-
-	if !oHelper:HasErrors()
-		if SA1->A1_PESSOA == 'J'
-			cNomDocto := 'CNPJ'
-			cDesDocto := cNomDocto + ': XX.XXX.XXX/XXX'
-			cNumDocto := transform(allTrim(SA1->A1_CGC), '@R 99.999.999/9999-99')
-		elseif SA1->A1_PESSOA == 'F'
-			cNomDocto := 'CPF'
-			cDesDocto := cNomDocto + ': XXX.XXX.XX'
-			cNumDocto := transform(allTrim(SA1->A1_CGC), '@R 999.999.999-99')
-		else
-			cNomDocto := 'documento'
-			cDesDocto := upper(cNomDocto) + ': XXXXX'
-			cNumDocto := allTrim(SA1->A1_CGC)
-		endIf
-
-		cDigDocto := subStr(cNumDocto, (len(cNumDocto) - 3), 4)
-
-		if !isZip
-			// cInstru1 := ''
-			// cInstru2 := 'Boletos anexados ao e-mail em formato PDF'
-			// cInstru3 := ''
-
-			cInstru1 := cMsg1
-			cInstru2 := cMsg2
-			cInstru3 := cMsg3
-		else
-			cInstru1 := '1 - Realizar a instalação do programa WinRar em seu computador'
-			cInstru2 := '2 - Baixe o arquivo ZIP em seu computador'
-			cInstru3 := '3 - Descompacte seus boletos' + iIf(!isPasswd, "", " (Senha: 5 primeiros dígitos do seu " + cNomDocto + ")")
-		endIf
-
-		oMail := tcPMail():New()
-
-		oMail:SetTo(allTrim(SA1->A1_UEMAIL))
-		oMail:SetSubject("Boletos Bancários")
-		oMail:SetHeader('CLIENTE: ' + allTrim(SA1->A1_NOME) + ' (' + alltrim(SA1->A1_COD) + ', ' + allTrim(SA1->A1_LOJA) + ')' ;
-			, cDesDocto + cDigDocto ;
-			, 'EMITIDO EM ' + dToC(date()) + ' AS ' + time() ;
-			, cInstru1 ;
-			, cInstru2 ;
-			, cInstru3)
-
-		oMail:SetTitle('WORKFLOW - GERAÇÃO DE BOLETOS BANCÁRIOS')
-
-		oMail:AddTableSection('Documentos Gerados', 1)
-
-		oMail:Section():SetHeader(1, 'NOME DOS ARQUIVOS')
-		oMail:Section():SetAlignColumn(1, 'LEFT')
-		oMail:Section():SetWidthColumn(1, 80)
-
-		for nRow := 1 to len(aAttach)
-			oMail:Section():AddObject()
-			oMail:Section():Object():AddItem(U_tcBrkFile(allTrim(aAttach[nRow]), 'File'))
-
-			oMail:Attach(aAttach[nRow])
 		next nRow
 
-		/*
-		Métodos usados somente para debugar o fonte
-		
-		oMail:SetDebug(.t.)
-		oMail:SetShowToLog(.t.)
-		*/
-
-		oMail:Generate()		//O método Generate() já executa o método setBody()
-		oMail:Send()
-		oMail:Destroy()
+		oAlerts:Add('doSendMail' ;
+			, 'Envio de e-mails concluído' ;
+			, 'I' ;
+			, cValToChar(nOk) + ' de ' + cValToChar(len(aRes)) + ' cliente(s) receberam os boletos por e-mail.')
 	endIf
 
-	restArea(areaSA1)
-
-	oAlerts:AddFrom(oHelper)
+	oMail:Destroy()
 return
+
+
+//-------------------------------------------------------------------
+/*/{Protheus.doc} logAlerts
+Grava as mensagens de processamento no log do servidor (execução via job)
+@author Pablo Regis
+@since 21/10/2026
+@version 1.0
+@type function
+/*/
+//-------------------------------------------------------------------
+static function logAlerts()
+	local aAlerts := oAlerts:GetAlerts()
+	local nRow    := 0
+	local cNivel  := ''
+
+	for nRow := 1 to len(aAlerts)
+		if aAlerts[nRow, 3] == 'E'
+			cNivel := 'ERROR'
+		elseIf aAlerts[nRow, 3] $ 'AW'
+			cNivel := 'WARN'
+		else
+			cNivel := 'INFO'
+		endIf
+
+		FWLogMsg(cNivel, , 'BOLETOEMAIL', 'TFIN0001', , '01', ;
+			allTrim(aAlerts[nRow, 2]) + ' - ' + allTrim(aAlerts[nRow, 4]), 0, 0, {})
+	next nRow
+return
+
+
+//-------------------------------------------------------------------
+/*/{Protheus.doc} toLogic
+Converte o conteúdo de um parâmetro (L ou C) para lógico
+@author Pablo Regis
+@since 21/10/2026
+@version 1.0
+@type function
+@param xValue, indefinido, conteúdo do parâmetro
+@return lRet, lógico, .t. para .T., T, S ou 1
+/*/
+//-------------------------------------------------------------------
+static function toLogic(xValue)
+	local lRet := .f.
+
+	if valType(xValue) == 'L'
+		lRet := xValue
+	elseIf valType(xValue) == 'C'
+		lRet := allTrim(upper(xValue)) $ '.T.|T|S|1'
+	endIf
+return(lRet)
 
 
 //-------------------------------------------------------------------
@@ -1629,6 +1640,11 @@ static function onLegend()
 	local aLegenda := {}
 
 	//Monta as cores
+	if SE1->(fieldPos('E1_XSTMAIL')) > 0
+		aAdd(aLegenda,{"BR_AZUL"   , "E-mail enviado"})
+		aAdd(aLegenda,{"BR_LARANJA", "Erro no envio do e-mail"})
+	endIf
+
 	aAdd(aLegenda,{"BR_VERDE"   , "Pendente"})
 	aAdd(aLegenda,{"BR_VERMELHO", "Impresso"})
 
@@ -1739,7 +1755,7 @@ static function filter()
 	aAdd(aParamBox, {1, "Cliente Até"		 , space(9)      , "@!", "", "SA1", "", 50, .f.})
 	aAdd(aParamBox, {1, "Loja Até"			 , space(4)      , "@!", "", ""   , "", 30, .f.})
 
-	aAdd(aParamBox, {3, "Situação", 1, {"Impressão", "Reimpressão"}, 060, "", .f.})
+	aAdd(aParamBox, {3, "Situação", 1, {"Impressão", "Reimpressão", "Pendente de e-mail"}, 060, "", .f.})
 
 	okPress := paramBox(aParamBox ;						//Array: 	Array contendo as perguntas
 	, 'Filtro da ' + cTitle ;		//Caracter:	Título da tela

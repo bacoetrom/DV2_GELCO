@@ -52,6 +52,7 @@ Classe principal da classe tcBoleto
 		data aDataSM0  as array   hidden		//Vetor de dados da empresa beneficiária
 		data cPathFile as string  hidden		//Caminho para geração do arquivo PDF
 		data cFileName as string  hidden		//Nome do arquivo PDF gerado
+		data lServer   as boolean hidden		//Indica se o PDF é gerado no servidor (envio por e-mail/job) - Default .f.
 
     /*
     Conteúdo do Vetor de dados (aData)
@@ -111,6 +112,7 @@ Classe principal da classe tcBoleto
 		method SetArray(aData)
 		method SetOutput(toOutput)
 		method SetAssign(toAssign)
+		method SetServer(lServer)
 
 		method GetPath()
 		method GetArray()
@@ -158,6 +160,7 @@ method New() class tcBoleto
 	::aData		 := {}
 	::aDataSM0   := loadSM0()
 	::cFileName  := ''
+	::lServer    := .f.
 return
 
 
@@ -267,6 +270,21 @@ oBoleto:SetAssign(toAssign)
 /*/
 method SetAssign(toAssign) class tcBoleto
 	::toAssign := toAssign
+return
+
+
+/*/{Protheus.doc} tcBoleto:SetServer
+Método para informar se o PDF será gerado no servidor (parâmetro lServer do FWMsPrinter)
+@author Pablo Regis
+@since 21/10/2026
+@version 1.0
+@type method
+@param lServer, lógico, .t. = gera o PDF no caminho do servidor informado em SetPath()
+@example
+oBoleto:SetServer(.t.)
+/*/
+method SetServer(lServer) class tcBoleto
+	::lServer := lServer
 return
 
 
@@ -1013,7 +1031,7 @@ method Printer() class tcBoleto
 	procRegua(0)
 	incProc("Imprimindo...")
 
-	oPrinter := fwMsPrinter():New(cPdfFile, iIf(::toOutput == 'Printer', IMP_SPOOL, IMP_PDF), lAdjustToLegacy, cLocal, lDisableSetup,,,,,,, .f.,)
+	oPrinter := fwMsPrinter():New(cPdfFile, iIf(::toOutput == 'Printer', IMP_SPOOL, IMP_PDF), lAdjustToLegacy, cLocal, lDisableSetup,,,, ::lServer,,, .f.,)
 
 	oPrinter:SetResolution(72)
 	oPrinter:SetPortrait()

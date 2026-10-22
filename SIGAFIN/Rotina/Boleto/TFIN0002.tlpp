@@ -1,0 +1,644 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+
+#define BM_ENVIADO      "1"
+#define BM_ERRO         "2"
+#define BM_TENTATIVAS   3
+#define BM_PORTA_PADRAO 587
+#define BM_TIMEOUT      60
+#define BM_ASSUNTO      "Boletos Bancários"
+
+/*/{Protheus.doc} TFIN0002
+Envio de boletos bancários por e-mail (substitui as classes tcEMail/tcPMail).
+Utilizada pela rotina TFIN0001 (tela e execução automática) e pelo job HJOB0008.
+
+Fluxo:
+  oMail := BolMailer():New()
+  oMail:LoadConfig()                         // lê os parâmetros uma única vez
+  cErro := oMail:Validate()                  // vazio = configuração OK
+  oMail:Connect()                            // uma conexão SMTP por lote
+  oMail:SendCustomer(cCli, cLoja, aFiles, lZip, lSenha, aInstru)   // um e-mail por cliente
+  oMail:Disconnect()
+  aRes := oMail:GetResults()                 // {cliente, loja, lOk, mensagem}
+  oMail:Destroy()
+
+Parâmetros (SX6):
+  MV_RELSERV - Servidor SMTP, com a porta após ":" (ex.: smtp.office365.com:587). Sem porta = 587
+  MV_RELACNT - Conta de autenticação
+  MV_RELPSW  - Senha da conta
+  MV_RELFROM - E-mail do remetente
+  MV_RELAUTH - Servidor exige autenticação (L)
+  MV_RELSSL  - Usa SSL (L)
+  MV_RELTLS  - Usa TLS (L)
+  MV_XBOLCCO - Cópia oculta dos e-mails de boleto (C, opcional)
+
+Rastreio (SE1), gravado somente se os campos existirem no dicionário:
+  E1_XSTMAIL (1=Enviado;2=Erro), E1_XDTMAIL, E1_XHRMAIL, E1_XERMAIL
+
+@type class
+@author Pablo Regis
+@since 21/10/2026
+/*/
+class BolMailer
+    private data cServer    as character
+    private data nPort      as numeric
+    private data cUser      as character
+    private data cPasswd    as character
+    private data cFrom      as character
+    private data cBcc       as character
+    private data lAuth      as logical
+    private data lSSL       as logical
+    private data lTLS       as logical
+    private data lTrack     as logical
+    private data nTamErro   as numeric
+    private data lConnected as logical
+    private data cLastError as character
+    private data oServer    as object
+    private data aResults   as array
+
+    public method new() as object
+    public method loadConfig() as logical
+    public method validate() as character
+    public method connect() as logical
+    public method disconnect() as logical
+    public method sendCustomer(cCliente as character, cLoja as character, aFiles as array, lZip as logical, lSenha as logical, aInstru as array) as logical
+    public method getResults() as array
+    public method getLastError() as character
+    public method destroy()
+
+    private method checkCustomer(cCliente as character, cLoja as character) as character
+    private method zipFiles(aArqs as array, lSenha as logical) as array
+    private method buildBody(aInstru as array, aNomes as array) as character
+    private method markSE1(aFiles as array, lOk as logical, cMsg as character)
+    private method addResult(cCliente as character, cLoja as character, lOk as logical, cMsg as character)
+endclass
+
+/*/{Protheus.doc} BolMailer:new
+Construtor da classe.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@return object, instância da classe
+/*/
+method new() as object class BolMailer
+    ::cServer    := ""
+    ::nPort      := BM_PORTA_PADRAO
+    ::cUser      := ""
+    ::cPasswd    := ""
+    ::cFrom      := ""
+    ::cBcc       := ""
+    ::lAuth      := .F.
+    ::lSSL       := .F.
+    ::lTLS       := .F.
+    ::lTrack     := .F.
+    ::nTamErro   := 0
+    ::lConnected := .F.
+    ::cLastError := ""
+    ::oServer    := Nil
+    ::aResults   := {}
+return self
+
+/*/{Protheus.doc} BolMailer:loadConfig
+Lê os parâmetros de envio (uma única vez, fora de laços) e verifica
+se os campos de rastreio existem no SE1.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method loadConfig() as logical class BolMailer
+    Local cServ := "" as character
+    Local nPos  := 0  as numeric
+
+    cServ := AllTrim(SuperGetMV("MV_RELSERV", .F., ""))
+    nPos  := At(":", cServ)
+
+    // A porta faz parte do MV_RELSERV; o servidor é enviado sem ela para o Init()
+    If nPos > 0
+        ::cServer := AllTrim(SubStr(cServ, 1, nPos - 1))
+        ::nPort   := Val(SubStr(cServ, nPos + 1))
+    Else
+        ::cServer := cServ
+        ::nPort   := BM_PORTA_PADRAO
+    EndIf
+
+    If ::nPort <= 0
+        ::nPort := BM_PORTA_PADRAO
+    EndIf
+
+    ::cUser   := AllTrim(SuperGetMV("MV_RELACNT", .F., ""))
+    ::cPasswd := AllTrim(SuperGetMV("MV_RELPSW" , .F., ""))
+    ::cFrom   := AllTrim(SuperGetMV("MV_RELFROM", .F., ""))
+    ::cBcc    := AllTrim(SuperGetMV("MV_XBOLCCO", .F., ""))
+    ::lAuth   := BMToLogical(SuperGetMV("MV_RELAUTH", .F., .F.))
+    ::lSSL    := BMToLogical(SuperGetMV("MV_RELSSL" , .F., .F.))
+    ::lTLS    := BMToLogical(SuperGetMV("MV_RELTLS" , .F., .F.))
+
+    ::lTrack := SE1->(FieldPos("E1_XSTMAIL")) > 0 .And. SE1->(FieldPos("E1_XDTMAIL")) > 0 .And. ;
+                SE1->(FieldPos("E1_XHRMAIL")) > 0 .And. SE1->(FieldPos("E1_XERMAIL")) > 0
+
+    If ::lTrack
+        ::nTamErro := TamSX3("E1_XERMAIL")[1]
+    EndIf
+return .T.
+
+/*/{Protheus.doc} BolMailer:validate
+Valida a configuração lida em loadConfig().
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@return character, mensagem de erro ou vazio quando a configuração está correta
+/*/
+method validate() as character class BolMailer
+    Local cMsg := "" as character
+
+    If Empty(::cServer)
+        cMsg := "Servidor SMTP não informado (parâmetro MV_RELSERV)."
+    ElseIf Empty(::cFrom)
+        cMsg := "Remetente não informado (parâmetro MV_RELFROM)."
+    ElseIf ::lAuth .And. (Empty(::cUser) .Or. Empty(::cPasswd))
+        cMsg := "Autenticação ativa (MV_RELAUTH) sem conta/senha (MV_RELACNT/MV_RELPSW)."
+    ElseIf ::lSSL .And. ::lTLS
+        cMsg := "MV_RELSSL e MV_RELTLS estão ativos ao mesmo tempo. Ative somente um deles."
+    EndIf
+
+    ::cLastError := cMsg
+return cMsg
+
+/*/{Protheus.doc} BolMailer:connect
+Conecta e autentica no servidor SMTP (até BM_TENTATIVAS tentativas).
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@return logical, .T. quando conectado
+/*/
+method connect() as logical class BolMailer
+    Local nErr := 0 as numeric
+    Local nTry := 0 as numeric
+
+    ::cLastError := ""
+
+    ::oServer := TMailManager():New()
+    ::oServer:SetUseSSL(::lSSL)
+    ::oServer:SetUseTLS(::lTLS)
+    ::oServer:Init("", ::cServer, ::cUser, ::cPasswd, 0, ::nPort)
+    ::oServer:SetSMTPTimeout(BM_TIMEOUT)
+
+    For nTry := 1 To BM_TENTATIVAS
+        nErr := ::oServer:SMTPConnect()
+
+        If nErr == 0
+            Exit
+        EndIf
+
+        If nTry < BM_TENTATIVAS
+            Sleep(1000)
+        EndIf
+    Next nTry
+
+    If nErr <> 0
+        ::cLastError := "Falha ao conectar no servidor " + ::cServer + ":" + cValToChar(::nPort) + ;
+                        " - " + AllTrim(::oServer:GetErrorString(nErr))
+    ElseIf ::lAuth
+        nErr := ::oServer:SMTPAuth(::cUser, ::cPasswd)
+
+        If nErr <> 0
+            ::cLastError := "Falha na autenticação SMTP da conta " + ::cUser + ;
+                            " - " + AllTrim(::oServer:GetErrorString(nErr))
+            ::oServer:SMTPDisconnect()
+        EndIf
+    EndIf
+
+    ::lConnected := (nErr == 0)
+
+    If ::lConnected
+        BMLog("INFO", "Conectado ao servidor SMTP " + ::cServer + ":" + cValToChar(::nPort))
+    Else
+        BMLog("ERROR", ::cLastError)
+    EndIf
+return ::lConnected
+
+/*/{Protheus.doc} BolMailer:disconnect
+Desconecta do servidor SMTP, se conectado.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method disconnect() as logical class BolMailer
+    If ::lConnected
+        ::oServer:SMTPDisconnect()
+        ::lConnected := .F.
+    EndIf
+return .T.
+
+/*/{Protheus.doc} BolMailer:sendCustomer
+Envia um e-mail ao cliente com os boletos anexados (PDFs ou ZIP) e grava o rastreio
+nos títulos. Os arquivos devem estar no servidor (rootpath).
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@param cCliente, character, código do cliente
+@param cLoja, character, loja do cliente
+@param aFiles, array, {{cArquivo, nRecnoSE1}, ...}
+@param lZip, logical, compacta os boletos em um arquivo ZIP
+@param lSenha, logical, aplica senha no ZIP (5 primeiros dígitos do CNPJ/CPF)
+@param aInstru, array, até 3 linhas de instrução para o corpo (usadas quando não compacta)
+@return logical, .T. quando o e-mail foi enviado
+/*/
+method sendCustomer(cCliente as character, cLoja as character, aFiles as array, lZip as logical, lSenha as logical, aInstru as array) as logical class BolMailer
+    Local aArea   := GetArea() as array
+    Local aArqs   := {} as array
+    Local aNomes  := {} as array
+    Local aAnexos := {} as array
+    Local aLinhas := {} as array
+    Local aZip    := {} as array
+    Local cMsg    := "" as character
+    Local cZip    := "" as character
+    Local nRow    := 0  as numeric
+    Local nErr    := 0  as numeric
+    Local oMsg    as object
+
+    If !::lConnected
+        cMsg := "Sem conexão com o servidor SMTP. " + ::cLastError
+    Else
+        cMsg := ::checkCustomer(cCliente, cLoja)   // posiciona o SA1
+    EndIf
+
+    If Empty(cMsg)
+        For nRow := 1 To Len(aFiles)
+            aAdd(aArqs, aFiles[nRow, 1])
+            aAdd(aNomes, BMFileName(aFiles[nRow, 1]))
+
+            If !File(aFiles[nRow, 1])
+                cMsg := "Arquivo do boleto não encontrado no servidor: " + aFiles[nRow, 1]
+                Exit
+            EndIf
+        Next nRow
+    EndIf
+
+    If Empty(cMsg)
+        If lZip
+            aZip    := ::zipFiles(aArqs, lSenha)
+            cMsg    := aZip[1]
+            cZip    := aZip[2]
+            aAnexos := {cZip}
+            aLinhas := {"1 - Baixe o arquivo ZIP anexado em seu computador", ;
+                        "2 - Descompacte o arquivo (Windows, WinRAR ou 7-Zip)", ;
+                        "3 - Abra os boletos em formato PDF"}
+
+            If lSenha
+                aLinhas[2] += " - senha: 5 primeiros dígitos do seu " + BMDocName()
+            EndIf
+        Else
+            aAnexos := aClone(aArqs)
+            aLinhas := aClone(aInstru)
+        EndIf
+    EndIf
+
+    If Empty(cMsg)
+        oMsg := TMailMessage():New()
+        oMsg:Clear()
+        oMsg:cDate    := cValToChar(Date())
+        oMsg:cFrom    := ::cFrom
+        oMsg:cTo      := AllTrim(SA1->A1_UEMAIL)
+        oMsg:cBcc     := ::cBcc
+        oMsg:cSubject := BM_ASSUNTO
+        oMsg:cBody    := ::buildBody(aLinhas, aNomes)
+
+        For nRow := 1 To Len(aAnexos)
+            nErr := oMsg:AttachFile(aAnexos[nRow])
+
+            If nErr < 0
+                cMsg := "Não foi possível anexar o arquivo " + aAnexos[nRow]
+                Exit
+            EndIf
+        Next nRow
+
+        If Empty(cMsg)
+            nErr := oMsg:Send(::oServer)
+
+            If nErr <> 0
+                cMsg := "Falha no envio para " + AllTrim(SA1->A1_UEMAIL) + " - " + ;
+                        AllTrim(::oServer:GetErrorString(nErr))
+            EndIf
+        EndIf
+
+        FreeObj(oMsg)   // TMailMessage não possui Destroy()
+    EndIf
+
+    // Arquivos temporários: o PDF é gerado novamente em um reenvio
+    For nRow := 1 To Len(aArqs)
+        FErase(aArqs[nRow])
+    Next nRow
+
+    If !Empty(cZip)
+        FErase(cZip)
+    EndIf
+
+    ::markSE1(aFiles, Empty(cMsg), cMsg)
+    ::addResult(cCliente, cLoja, Empty(cMsg), cMsg)
+
+    RestArea(aArea)
+return Empty(cMsg)
+
+/*/{Protheus.doc} BolMailer:getResults
+Retorna o resultado de cada envio realizado.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@return array, {{cCliente, cLoja, lOk, cMensagem}, ...}
+/*/
+method getResults() as array class BolMailer
+return ::aResults
+
+/*/{Protheus.doc} BolMailer:getLastError
+Retorna o último erro de configuração/conexão.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@return character, mensagem do último erro
+/*/
+method getLastError() as character class BolMailer
+return ::cLastError
+
+/*/{Protheus.doc} BolMailer:destroy
+Desconecta do servidor e libera os objetos.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+/*/
+method destroy() class BolMailer
+    ::disconnect()
+
+    If ValType(::oServer) == "O"
+        FreeObj(::oServer)   // TMailManager não possui Destroy()
+    EndIf
+
+    ::aResults := {}
+return
+
+/*/{Protheus.doc} BolMailer:checkCustomer
+Posiciona o cliente e valida se ele recebe boleto por e-mail.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@param cCliente, character, código do cliente
+@param cLoja, character, loja do cliente
+@return character, mensagem de erro ou vazio quando o cliente está apto
+/*/
+method checkCustomer(cCliente as character, cLoja as character) as character class BolMailer
+    Local cMsg := "" as character
+
+    SA1->(DbSetOrder(1)) // A1_FILIAL+A1_COD+A1_LOJA
+
+    If !SA1->(DbSeek(xFilial("SA1") + cCliente + cLoja))
+        cMsg := "Cliente não encontrado."
+    ElseIf SA1->(FieldPos("A1_UENVBOL")) > 0 .And. SA1->A1_UENVBOL == "2"
+        cMsg := "Cliente não está parametrizado para receber boleto por e-mail (A1_UENVBOL)."
+    ElseIf Empty(SA1->A1_UEMAIL)
+        cMsg := "Cliente sem e-mail informado (A1_UEMAIL)."
+    EndIf
+return cMsg
+
+/*/{Protheus.doc} BolMailer:zipFiles
+Compacta os boletos do cliente posicionado no SA1.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@param aArqs, array, caminhos completos dos PDFs no servidor
+@param lSenha, logical, aplica senha (5 primeiros dígitos do CNPJ/CPF)
+@return array, {cMensagemErro, cCaminhoZip} - mensagem vazia quando compactado
+/*/
+method zipFiles(aArqs as array, lSenha as logical) as array class BolMailer
+    Local cMsg   := "" as character
+    Local cZip   := "" as character
+    Local cDir   := "" as character
+    Local cSenha := "" as character
+    Local nRet   := 0  as numeric
+
+    cDir := BMFilePath(aArqs[1])
+    cZip := cDir + AllTrim(SA1->A1_CGC) + "_" + DToS(Date()) + StrTran(Time(), ":", "") + ".zip"
+
+    If lSenha
+        cSenha := SubStr(AllTrim(SA1->A1_CGC), 1, 5)
+    EndIf
+
+    If File(cZip)
+        FErase(cZip)
+    EndIf
+
+    nRet := FZip(cZip, aArqs, cDir, cSenha)
+
+    If nRet <> 0 .Or. !File(cZip)
+        cMsg := "Não foi possível criar o arquivo ZIP " + cZip + " (retorno " + cValToChar(nRet) + ")."
+        cZip := ""
+    EndIf
+return {cMsg, cZip}
+
+/*/{Protheus.doc} BolMailer:buildBody
+Monta o corpo HTML do e-mail para o cliente posicionado no SA1.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@param aInstru, array, linhas de instrução
+@param aNomes, array, nomes dos arquivos de boleto
+@return character, HTML do corpo do e-mail
+/*/
+method buildBody(aInstru as array, aNomes as array) as character class BolMailer
+    Local cHtml := "" as character
+    Local nRow  := 0  as numeric
+
+    cHtml := '<html><body style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#333333;">'
+    cHtml += '<h3 style="color:#1F4E79;">Envio de Boletos Banc&aacute;rios</h3>'
+    cHtml += '<p><b>Cliente:</b> ' + BMHtml(AllTrim(SA1->A1_NOME)) + ;
+             ' (' + AllTrim(SA1->A1_COD) + ' / ' + AllTrim(SA1->A1_LOJA) + ')<br/>'
+    cHtml += '<b>' + BMDocName() + ':</b> ' + BMMaskDoc() + '<br/>'
+    cHtml += '<b>Emitido em:</b> ' + DToC(Date()) + ' &agrave;s ' + Time() + '</p>'
+
+    For nRow := 1 To Len(aInstru)
+        If !Empty(aInstru[nRow])
+            cHtml += '<p>' + BMHtml(AllTrim(aInstru[nRow])) + '</p>'
+        EndIf
+    Next nRow
+
+    cHtml += '<table cellpadding="4" cellspacing="0" border="1" style="border-collapse:collapse;border-color:#BFBFBF;">'
+    cHtml += '<tr style="background-color:#DDEBF7;"><th align="left">Arquivos gerados</th></tr>'
+
+    For nRow := 1 To Len(aNomes)
+        cHtml += '<tr><td>' + BMHtml(aNomes[nRow]) + '</td></tr>'
+    Next nRow
+
+    cHtml += '</table>'
+    cHtml += '<p style="font-size:11px;color:#7F7F7F;">E-mail gerado automaticamente. N&atilde;o responda esta mensagem.</p>'
+    cHtml += '</body></html>'
+return cHtml
+
+/*/{Protheus.doc} BolMailer:markSE1
+Grava o rastreio do envio nos títulos (somente se os campos existirem no dicionário).
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@param aFiles, array, {{cArquivo, nRecnoSE1}, ...}
+@param lOk, logical, envio realizado
+@param cMsg, character, mensagem de erro (vazia quando enviado)
+/*/
+method markSE1(aFiles as array, lOk as logical, cMsg as character) class BolMailer
+    Local aAreaSE1 := SE1->(GetArea()) as array
+    Local nRow     := 0  as numeric
+    Local cStatus  := "" as character
+
+    If ::lTrack
+        If lOk
+            cStatus := BM_ENVIADO
+        Else
+            cStatus := BM_ERRO
+        EndIf
+
+        For nRow := 1 To Len(aFiles)
+            SE1->(DbGoTo(aFiles[nRow, 2]))
+
+            If !SE1->(Eof()) .And. SE1->(RecLock("SE1", .F.))
+                SE1->E1_XSTMAIL := cStatus
+                SE1->E1_XDTMAIL := Date()
+                SE1->E1_XHRMAIL := Time()
+                SE1->E1_XERMAIL := Left(cMsg, ::nTamErro)
+                SE1->(MsUnlock())
+            EndIf
+        Next nRow
+    EndIf
+
+    RestArea(aAreaSE1)
+return
+
+/*/{Protheus.doc} BolMailer:addResult
+Registra o resultado do envio de um cliente e grava no log do servidor.
+@type method
+@author Pablo Regis
+@since 21/10/2026
+@param cCliente, character, código do cliente
+@param cLoja, character, loja do cliente
+@param lOk, logical, envio realizado
+@param cMsg, character, mensagem de erro (vazia quando enviado)
+/*/
+method addResult(cCliente as character, cLoja as character, lOk as logical, cMsg as character) class BolMailer
+    aAdd(::aResults, {cCliente, cLoja, lOk, cMsg})
+
+    If lOk
+        BMLog("INFO", "Boletos enviados ao cliente " + AllTrim(cCliente) + "/" + AllTrim(cLoja))
+    Else
+        BMLog("WARN", "Boletos NÃO enviados ao cliente " + AllTrim(cCliente) + "/" + AllTrim(cLoja) + " - " + cMsg)
+    EndIf
+return
+
+/*/{Protheus.doc} BMToLogical
+Converte o conteúdo de um parâmetro para lógico (aceita L ou C: .T., T, S, 1).
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@param xValue, variant, conteúdo do parâmetro
+@return logical, valor lógico
+/*/
+Static Function BMToLogical(xValue as variant) as logical
+    Local lRet := .F. as logical
+
+    If ValType(xValue) == "L"
+        lRet := xValue
+    ElseIf ValType(xValue) == "C"
+        lRet := AllTrim(Upper(xValue)) $ ".T.|T|S|1"
+    EndIf
+return lRet
+
+/*/{Protheus.doc} BMDocName
+Nome do documento do cliente posicionado no SA1.
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@return character, CNPJ, CPF ou Documento
+/*/
+Static Function BMDocName() as character
+    Local cNome := "Documento" as character
+
+    If SA1->A1_PESSOA == "J"
+        cNome := "CNPJ"
+    ElseIf SA1->A1_PESSOA == "F"
+        cNome := "CPF"
+    EndIf
+return cNome
+
+/*/{Protheus.doc} BMMaskDoc
+Documento do cliente posicionado no SA1 com os dígitos iniciais ocultos.
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@return character, documento mascarado (ex.: XX.XXX.XXX/0001-95)
+/*/
+Static Function BMMaskDoc() as character
+    Local cDoc  := AllTrim(SA1->A1_CGC) as character
+    Local cMask := "" as character
+
+    If SA1->A1_PESSOA == "J" .And. Len(cDoc) == 14
+        cMask := "XX.XXX.XXX/" + SubStr(cDoc, 9, 4) + "-" + SubStr(cDoc, 13, 2)
+    ElseIf SA1->A1_PESSOA == "F" .And. Len(cDoc) == 11
+        cMask := "XXX.XXX." + SubStr(cDoc, 7, 3) + "-" + SubStr(cDoc, 10, 2)
+    ElseIf Len(cDoc) > 4
+        cMask := Replicate("X", Len(cDoc) - 4) + Right(cDoc, 4)
+    Else
+        cMask := cDoc
+    EndIf
+return cMask
+
+/*/{Protheus.doc} BMFileName
+Retorna somente o nome do arquivo de um caminho completo.
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@param cPath, character, caminho completo
+@return character, nome do arquivo
+/*/
+Static Function BMFileName(cPath as character) as character
+    Local cAux := StrTran(AllTrim(cPath), "/", "\") as character
+return SubStr(cAux, RAt("\", cAux) + 1)
+
+/*/{Protheus.doc} BMFilePath
+Retorna o diretório (com a barra final) de um caminho completo.
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@param cPath, character, caminho completo
+@return character, diretório do arquivo
+/*/
+Static Function BMFilePath(cPath as character) as character
+    Local cAux := AllTrim(cPath) as character
+    Local nPos := 0 as numeric
+
+    nPos := Max(RAt("\", cAux), RAt("/", cAux))
+return SubStr(cAux, 1, nPos)
+
+/*/{Protheus.doc} BMHtml
+Escapa os caracteres especiais de HTML.
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@param cText, character, texto
+@return character, texto escapado
+/*/
+Static Function BMHtml(cText as character) as character
+    Local cRet := cText as character
+
+    cRet := StrTran(cRet, "&", "&amp;")
+    cRet := StrTran(cRet, "<", "&lt;")
+    cRet := StrTran(cRet, ">", "&gt;")
+return cRet
+
+/*/{Protheus.doc} BMLog
+Registra mensagem no log do servidor (FWLogMsg).
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@param cNivel, character, severidade (INFO, WARN, ERROR)
+@param cMsg, character, mensagem
+/*/
+Static Function BMLog(cNivel as character, cMsg as character)
+    FWLogMsg(cNivel, , "BOLETOEMAIL", "TFIN0002", , "01", cMsg, 0, 0, {})
+return

@@ -1,0 +1,115 @@
+#include "tlpp-core.th"
+#include "totvs.ch"
+
+#define HJ_SITUACAO_EMAIL 3     // TFIN0001 - MV_PAR19: 3 = Pendente de e-mail
+#define HJ_QTD_PARAM      19    // Quantidade de parâmetros de filtro da TFIN0001
+
+/*/{Protheus.doc} HJOB0008
+Job de envio automático de boletos bancários por e-mail.
+
+Seleciona os títulos a receber emitidos nos últimos MV_XBOLDIA dias, em cobrança
+(E1_SITUACA <> '0') e ainda não enviados (E1_XSTMAIL <> '1'), gera os boletos no
+servidor e envia um e-mail por cliente (U_TFin0001 com saída 'E-mail').
+
+Agendamento:
+  - Schedule do Configurador (SIGACFG): cadastrar a rotina HJOB0008 informando
+    empresa/filial. O ambiente é preparado pelo Schedule (SchedDef).
+  - Job no appserver.ini (OnStart) / Schedule legado: informar empresa e filial
+    em aParam ({cEmpresa, cFilial}). O ambiente é preparado por esta rotina.
+
+Parâmetros (SX6):
+  MV_XBOLDIA - Quantidade de dias para trás (emissão) considerados pelo job. Default 1
+  MV_UZIPBOL - Compacta os boletos em ZIP (L)
+  MV_UZIPPWD - Aplica senha no ZIP (L)
+  Demais parâmetros de e-mail: ver TFIN0002 (BolMailer)
+
+A execução é serializada por empresa/filial (LockByName).
+
+@type user function
+@author Pablo Regis
+@since 21/10/2026
+@param aParam, array, {cEmpresa, cFilial} quando executado sem o Schedule
+@return logical, .T. quando o processamento foi executado
+/*/
+User Function HJOB0008(aParam as array) as logical
+    Local lPrepEnv := .F. as logical
+    Local lRet     := .F. as logical
+    Local cLock    := ""  as character
+    Local nDias    := 0   as numeric
+    Local aFiltro  := {}  as array
+
+    Default aParam := {}
+
+    // Sem ambiente preparado (job/OnStart): abre a empresa/filial recebida
+    If Type("cEmpAnt") <> "C"
+        If Len(aParam) < 2 .Or. Empty(aParam[1]) .Or. Empty(aParam[2])
+            HJLog("ERROR", "Empresa/filial não informadas em aParam. Processamento cancelado.")
+            Return .F.
+        EndIf
+
+        RpcSetType(3)   // não consome licença
+        lPrepEnv := RpcSetEnv(aParam[1], aParam[2], , , "FIN", "HJOB0008")
+
+        If !lPrepEnv
+            HJLog("ERROR", "Não foi possível preparar o ambiente " + cValToChar(aParam[1]) + "/" + cValToChar(aParam[2]) + ".")
+            Return .F.
+        EndIf
+    EndIf
+
+    cLock := "HJOB0008" + AllTrim(cEmpAnt) + AllTrim(cFilAnt)
+
+    If !LockByName(cLock, .T., .F.)
+        HJLog("WARN", "Job já está em execução para a empresa/filial " + cEmpAnt + "/" + cFilAnt + ".")
+    Else
+        nDias := SuperGetMV("MV_XBOLDIA", .F., 1)
+
+        If ValType(nDias) <> "N" .Or. nDias < 0
+            nDias := 1
+        EndIf
+
+        aFiltro := Array(HJ_QTD_PARAM)
+        aFill(aFiltro, "")
+
+        aFiltro[03] := dDataBase - nDias    // Data Emissão De
+        aFiltro[04] := dDataBase            // Data Emissão Até
+        aFiltro[05] := CToD("")             // Data Vencimento De
+        aFiltro[06] := CToD("")             // Data Vencimento Até
+        aFiltro[19] := HJ_SITUACAO_EMAIL    // Situação: pendente de e-mail
+
+        HJLog("INFO", "Início do envio de boletos por e-mail - empresa/filial " + cEmpAnt + "/" + cFilAnt + ;
+                      " - emissão de " + DToC(aFiltro[03]) + " a " + DToC(aFiltro[04]) + ".")
+
+        U_TFin0001("E-mail", aFiltro)
+
+        HJLog("INFO", "Fim do envio de boletos por e-mail - empresa/filial " + cEmpAnt + "/" + cFilAnt + ".")
+
+        UnLockByName(cLock, .T., .F.)
+        lRet := .T.
+    EndIf
+
+    If lPrepEnv
+        RpcClearEnv()
+    EndIf
+Return lRet
+
+/*/{Protheus.doc} SchedDef
+Definição para o Schedule do Configurador (processo sem pergunte).
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@return array, {Tipo, Pergunte, Alias, Ordens, Título}
+/*/
+Static Function SchedDef() as array
+Return {"P", "PARAMDEF", "", {}, ""}
+
+/*/{Protheus.doc} HJLog
+Registra mensagem no log do servidor (FWLogMsg).
+@type static function
+@author Pablo Regis
+@since 21/10/2026
+@param cNivel, character, severidade (INFO, WARN, ERROR)
+@param cMsg, character, mensagem
+/*/
+Static Function HJLog(cNivel as character, cMsg as character)
+    FWLogMsg(cNivel, , "BOLETOEMAIL", "HJOB0008", , "01", cMsg, 0, 0, {})
+Return
