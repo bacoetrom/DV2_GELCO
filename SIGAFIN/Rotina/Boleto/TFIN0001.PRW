@@ -1225,6 +1225,23 @@ static function doPrinter(cDevice, recno_SEE)
 						if !oBoleto:HasErrors()		//Não imprime boleto sem nosso número/código de barras
 							oBoleto:Printer()
 
+							if cDevice == 'File'
+								if file(oBoleto:GetFileName())
+									oHelper:Add('doPrinter' ;
+										, 'Arquivo gerado com sucesso!' ;
+										, 'I' ;
+										, 'O arquivo <' + oBoleto:GetFileName() + '> foi gerado para o título <' ;
+										+ allTrim(SE1->E1_PREFIXO) + '/' + allTrim(SE1->E1_NUM) + '/' + allTrim(SE1->E1_PARCELA) ;
+										+ '> do cliente <' + allTrim(SE1->E1_CLIENTE) + '> e loja <' + allTrim(SE1->E1_LOJA) + '>.')
+								else
+									oHelper:Add('doPrinter' ;
+										, 'Arquivo não foi gerado!' ;
+										, 'A' ;
+										, 'O arquivo <' + oBoleto:GetFileName() + '> não foi encontrado após a geração do título <' ;
+										+ allTrim(SE1->E1_PREFIXO) + '/' + allTrim(SE1->E1_NUM) + '/' + allTrim(SE1->E1_PARCELA) + '>.')
+								endIf
+							endIf
+
 							aAdd(aFiles ;
 								, {SE1->E1_CLIENTE ;			//Código do cliente
 								, SE1->E1_LOJA ;			//Loja do cliente
@@ -1517,6 +1534,13 @@ static function toSend(cCliente, cLoja, aAttach)
 				+ '> e loja <' + allTrim(cLoja) + '> (' + allTrim(SA1->A1_UEMAIL) + '). ' ;
 				+ 'Motivo: ' + oMail:GetLastError() + '. ' ;
 				+ 'Verifique os parâmetros MV_RELSERV, MV_RELACNT, MV_RELPSW, MV_RELFROM e MV_RELAUTH.')
+		else
+			oHelper:Add('toSend' ;
+				, 'E-mail enviado com sucesso!' ;
+				, 'I' ;
+				, 'E-mail enviado para o cliente com código <' + allTrim(cCliente) ;
+				+ '> e loja <' + allTrim(cLoja) + '> (' + allTrim(SA1->A1_UEMAIL) + ') ' ;
+				+ 'com ' + cValToChar(len(aAttach)) + ' anexo(s).')
 		endIf
 
 		oMail:Destroy()

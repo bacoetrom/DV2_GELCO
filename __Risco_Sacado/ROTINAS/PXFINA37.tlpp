@@ -3,13 +3,14 @@
 
 #define RS_PARAM_LOAD "PXFINA37"
 #define RS_TITULO     "Risco Sacado"
-#define RS_RISCO_SIM  "S"
-#define RS_RISCO_NAO  "N"
-#define RS_DISPONIVEL "1"
-#define RS_ANTECIPADO "2"
-#define RS_EM_ABERTO  "3"
-#define RS_TOLERANCIA 0.0049
-#define RS_MAX_LOG    40
+#define RS_RISCO_SIM   "S"
+#define RS_RISCO_NAO   "N"
+#define RS_DISPONIVEL  "1"
+#define RS_ANTECIPADO  "2"
+#define RS_EM_ABERTO   "3"
+#define RS_PROCESSANDO "9"
+#define RS_TOLERANCIA  0.0049
+#define RS_MAX_LOG     40
 
 // Posições do array de parâmetros (ParamBox)
 #define PAR_FILDE     1
@@ -31,6 +32,7 @@
 #define SIT_ANTECIPADO 3
 #define SIT_EM_ABERTO  4
 #define SIT_EM_RISCO   5
+#define SIT_INCONSIST  6
 
 // Posições do array de títulos marcados
 #define MRK_RECNO     1
@@ -47,14 +49,17 @@ Ações:
   - Antecipado        : 1 -> 2. Baixa o título do fornecedor (motivo MV_XRSMOT) e gera o título a pagar do banco.
   - Em aberto         : 1 -> 3. Título volta ao fluxo normal do Contas a Pagar.
   - Estornar Situação : 3 -> 1 (sem movimento após o envio) e 2 -> 1 (exclui título do banco e cancela a baixa).
+  - Conciliar         : resolve o título cuja antecipação ficou incompleta (situação 9, Antecipado sem
+                        baixa ou Disponível já baixado), concluindo ou desfazendo conforme o estado real.
   - Excluir Lote      : devolve os títulos do lote para "sem risco" (sem título antecipado e sem movimento).
 
-Situações 1 e 2 só podem ser movimentadas por esta rotina (PEs FINM020, FA080TIT, FA050UPD e F240TIT).
+Situações 1, 2 e 9 só podem ser movimentadas por esta rotina (PEs FINM020, FA080TIT, FA050UPD e F240TIT).
 
 Parâmetros (ParamBox - última seleção salva por usuário, sem dependência de SX1):
   01 Filial de / 02 Filial até / 03 Vencimento real de / 04 Vencimento real até /
   05 Fornecedor de / 06 Fornecedor até / 07 Natureza de / 08 Natureza até / 09 Lote de / 10 Lote até /
-  11 Situação (1=Sem risco;2=Disponível;3=Antecipado;4=Em aberto;5=Todos em risco) / 12 Banco do risco sacado (SA6)
+  11 Situação (1=Sem risco;2=Disponível;3=Antecipado;4=Em aberto;5=Todos em risco;6=Inconsistentes) /
+  12 Banco do risco sacado (SA6)
 
 @type user function
 @author bacoetrom
@@ -93,7 +98,7 @@ Static Function Parametros() as array
     Local nTamNat   := TamSX3("E2_NATUREZ")[1] as numeric
     Local nTamLote  := TamSX3("E2_XLOTRS")[1] as numeric
 
-    aSituacao := {"1-Sem risco", "2-Disponível", "3-Antecipado", "4-Em aberto", "5-Todos em risco"}
+    aSituacao := {"1-Sem risco", "2-Disponível", "3-Antecipado", "4-Em aberto", "5-Todos em risco", "6-Inconsistentes"}
 
     aAdd(aPergs, {1, "Filial de"            , Space(nTamFil)               , "@!", ".T.", "SM0", ".T.", 50, .F.})
     aAdd(aPergs, {1, "Filial até"           , Replicate("Z", nTamFil)      , "@!", ".T.", "SM0", ".T.", 50, .T.})
@@ -179,6 +184,7 @@ Static Function MontaTela(aPar as array) as logical
     oMark:AddButton("Antecipado"       , {|| AcaoAntecipado(oMark, aPar)})
     oMark:AddButton("Em aberto"        , {|| AcaoEmAberto(oMark, aPar)})
     oMark:AddButton("Estornar Situação", {|| AcaoEstorno(oMark, aPar)})
+    oMark:AddButton("Conciliar"        , {|| AcaoConcilia(oMark, aPar)})
     oMark:AddButton("Excluir Lote"     , {|| AcaoExcluirLote(oMark, aPar)})
     oMark:AddButton("Sair"             , {|| oDlg:End()})
 
@@ -289,6 +295,16 @@ Static Function CarregaTitulos(cAlias as character, aPar as array) as numeric
         cQuery += "   AND SE2.E2_SALDO > 0 "
         cQuery += "   AND SE2.E2_NUMBOR = ? "
         aAdd(aBind, Space(TamSX3("E2_NUMBOR")[1]))
+    ElseIf nSituac == SIT_INCONSIST
+        // Antecipação incompleta: Em processamento, Antecipado sem baixa ou Disponível já baixado
+        cQuery += "   AND SE2.E2_XRISCO = ? "
+        aAdd(aBind, RS_RISCO_SIM)
+        cQuery += "   AND (   SE2.E2_XSTRIC = ? "
+        aAdd(aBind, RS_PROCESSANDO)
+        cQuery += "        OR (SE2.E2_XSTRIC = ? AND SE2.E2_SALDO > 0) "
+        aAdd(aBind, RS_ANTECIPADO)
+        cQuery += "        OR (SE2.E2_XSTRIC = ? AND SE2.E2_SALDO <= 0) ) "
+        aAdd(aBind, RS_DISPONIVEL)
     Else
         cQuery += "   AND SE2.E2_XRISCO = ? "
         aAdd(aBind, RS_RISCO_SIM)
@@ -615,7 +631,9 @@ Return ValType(xQtd) == "N" .And. xQtd > 0
 
 /*/{Protheus.doc} AcaoAntecipado
 Ação "Antecipado" (1 -> 2): para cada título marcado, baixa o título do fornecedor e gera o
-título a pagar do banco (U_PXRSAntecipa). Cada título tem a sua transação: um erro desfaz só o título.
+título a pagar do banco (U_PXRSAntecipa). Não há transação envolvendo os ExecAuto (ver o
+cabeçalho de PXFINA37S): a falha de um passo é compensada pela própria rotina e, quando a
+compensação não é possível, o título fica na situação 9 (Em processamento) para a ação Conciliar.
 Somente títulos da filial logada (ExecAuto roda na filial corrente; cFilAnt não é trocado).
 @type static function
 @author bacoetrom
@@ -653,6 +671,10 @@ Return .T.
 
 /*/{Protheus.doc} ProcessaAntecipacao
 Processa a antecipação dos títulos selecionados (sem interface; mensagens no log).
+Cada título é processado isoladamente e protegido por Try/Catch: um erro de execução não
+interrompe a lista nem deixa o laço sem registro do que aconteceu.
+Se sobrar transação aberta após um título (o padrão pode sair de dentro da própria transação),
+o processamento é interrompido: continuar efetivaria gravações pendentes do título anterior.
 @type static function
 @author bacoetrom
 @since 19/10/2026
@@ -662,9 +684,10 @@ Processa a antecipação dos títulos selecionados (sem interface; mensagens no log
 @return numeric, quantidade de títulos antecipados
 /*/
 Static Function ProcessaAntecipacao(aSel as array, jCfg as json, aLog as array) as numeric
-    Local cMsg := "" as character
-    Local nI   := 0 as numeric
-    Local nOk  := 0 as numeric
+    Local cMsg  := "" as character
+    Local nI    := 0 as numeric
+    Local nOk   := 0 as numeric
+    Local oErro as object
 
     For nI := 1 To Len(aSel)
         SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
@@ -672,12 +695,27 @@ Static Function ProcessaAntecipacao(aSel as array, jCfg as json, aLog as array) 
             aAdd(aLog, ChaveTitulo() + ": título de outra filial. Acesse a filial " + AllTrim(aSel[nI][MRK_FILIAL]) + " para antecipar.")
             Loop
         EndIf
-        cMsg := U_PXRSAntecipa(aSel[nI][MRK_RECNO], jCfg)
+
+        cMsg := ""
+        Try
+            cMsg := U_PXRSAntecipa(aSel[nI][MRK_RECNO], jCfg)
+        Catch oErro
+            cMsg := "erro inesperado na antecipação: " + oErro:Description
+            U_PXRSLog("ERROR", "ProcessaAntecipacao: " + cMsg)
+        EndTry
+
         SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
         If Empty(cMsg)
             nOk++
         Else
             aAdd(aLog, ChaveTitulo() + ": " + cMsg)
+        EndIf
+
+        If InTransact()
+            aAdd(aLog, "Processamento interrompido: transação aberta após o título acima. " + ;
+                       "Os títulos restantes não foram processados. Confira a situação pelo filtro 'Inconsistentes'.")
+            U_PXRSLog("ERROR", "ProcessaAntecipacao: transação aberta após " + ChaveTitulo())
+            Exit
         EndIf
     Next nI
 Return nOk
@@ -766,6 +804,7 @@ Return .T.
 
 /*/{Protheus.doc} ProcessaEstorno
 Processa o estorno de situação dos títulos selecionados (sem interface; mensagens no log).
+Cada título é protegido por Try/Catch e o laço é interrompido se sobrar transação aberta.
 @type static function
 @author bacoetrom
 @since 19/10/2026
@@ -774,9 +813,10 @@ Processa o estorno de situação dos títulos selecionados (sem interface; mensagen
 @return numeric, quantidade de títulos estornados
 /*/
 Static Function ProcessaEstorno(aSel as array, aLog as array) as numeric
-    Local cMsg := "" as character
-    Local nI   := 0 as numeric
-    Local nOk  := 0 as numeric
+    Local cMsg  := "" as character
+    Local nI    := 0 as numeric
+    Local nOk   := 0 as numeric
+    Local oErro as object
 
     For nI := 1 To Len(aSel)
         SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
@@ -786,6 +826,8 @@ Static Function ProcessaEstorno(aSel as array, aLog as array) as numeric
             cMsg := "título não está em risco sacado."
         ElseIf SE2->E2_XSTRIC == RS_DISPONIVEL
             cMsg := "título já está 'Disponível'."
+        ElseIf SE2->E2_XSTRIC == RS_PROCESSANDO
+            cMsg := "título está 'Em processamento'; use a ação Conciliar."
         ElseIf SE2->E2_XSTRIC == RS_EM_ABERTO
             If SE2->E2_SALDO < SE2->E2_VALOR - RS_TOLERANCIA
                 cMsg := "título 'Em aberto' possui baixa após o envio ao banco."
@@ -799,7 +841,12 @@ Static Function ProcessaEstorno(aSel as array, aLog as array) as numeric
                 End Transaction
             EndIf
         ElseIf SE2->E2_XSTRIC == RS_ANTECIPADO
-            cMsg := U_PXRSEstornaAntecipacao(aSel[nI][MRK_RECNO])
+            Try
+                cMsg := U_PXRSEstornaAntecipacao(aSel[nI][MRK_RECNO])
+            Catch oErro
+                cMsg := "erro inesperado no estorno: " + oErro:Description
+                U_PXRSLog("ERROR", "ProcessaEstorno: " + cMsg)
+            EndTry
         Else
             cMsg := "situação atual não permite estorno."
         EndIf
@@ -809,6 +856,102 @@ Static Function ProcessaEstorno(aSel as array, aLog as array) as numeric
             nOk++
         Else
             aAdd(aLog, ChaveTitulo() + ": " + cMsg)
+        EndIf
+
+        If InTransact()
+            aAdd(aLog, "Processamento interrompido: transação aberta após o título acima. " + ;
+                       "Os títulos restantes não foram processados. Confira a situação pelo filtro 'Inconsistentes'.")
+            U_PXRSLog("ERROR", "ProcessaEstorno: transação aberta após " + ChaveTitulo())
+            Exit
+        EndIf
+    Next nI
+Return nOk
+
+/*/{Protheus.doc} AcaoConcilia
+Ação "Conciliar": resolve os títulos cuja antecipação ficou incompleta, decidindo pelo estado
+real dos registros (baixa do fornecedor e existência do título a pagar do banco). Atende tanto
+os títulos deixados na situação 9 (Em processamento) quanto os que ficaram inconsistentes antes
+da correção da rotina (Disponível já baixado ou Antecipado sem baixa).
+@type static function
+@author bacoetrom
+@since 28/10/2026
+@param oMark, object, FWMarkBrowse
+@param aPar, array, respostas dos parâmetros (ParamBox)
+@return logical, .T. quando processado
+/*/
+Static Function AcaoConcilia(oMark as object, aPar as array) as logical
+    Local aSel := {} as array
+    Local aLog := {} as array
+    Local nOk  := 0 as numeric
+    Local jCfg as json
+
+    aSel := ColetaMarcados(oMark)
+    If Empty(aSel)
+        FWAlertWarning("Nenhum título marcado.", RS_TITULO)
+        Return .F.
+    EndIf
+
+    If !MsgYesNo("Confirma a conciliação de " + cValToChar(Len(aSel)) + " título(s)?" + CRLF + ;
+                 "Título com baixa e com título do banco: marcado como 'Antecipado'." + CRLF + ;
+                 "Título com baixa e sem título do banco: o título do banco será gerado." + CRLF + ;
+                 "Demais casos: a antecipação será desfeita e o título volta para 'Disponível'.", RS_TITULO)
+        Return .F.
+    EndIf
+
+    // Parâmetros lidos uma única vez, fora do laço
+    jCfg := U_PXRSConfig()
+
+    FWMsgRun(, {|| nOk := ProcessaConciliacao(aSel, jCfg, aLog)}, RS_TITULO, "Conciliando títulos...")
+
+    aAdd(aLog, "Conciliar: " + cValToChar(nOk) + " de " + cValToChar(Len(aSel)) + " título(s) conciliado(s).")
+    U_PXRSLog("INFO", "Conciliar: " + cValToChar(nOk) + " título(s) - usuário " + AllTrim(UsrRetName(RetCodUsr())))
+    MostraLog(aLog)
+    Recarrega(oMark, aPar)
+Return .T.
+
+/*/{Protheus.doc} ProcessaConciliacao
+Processa a conciliação dos títulos selecionados (sem interface; mensagens no log).
+@type static function
+@author bacoetrom
+@since 28/10/2026
+@param aSel, array, títulos marcados
+@param jCfg, json, parâmetros lidos por U_PXRSConfig
+@param aLog, array, log de processamento (por referência)
+@return numeric, quantidade de títulos conciliados
+/*/
+Static Function ProcessaConciliacao(aSel as array, jCfg as json, aLog as array) as numeric
+    Local cMsg  := "" as character
+    Local nI    := 0 as numeric
+    Local nOk   := 0 as numeric
+    Local oErro as object
+
+    For nI := 1 To Len(aSel)
+        SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
+        If aSel[nI][MRK_FILIAL] <> xFilial("SE2")
+            aAdd(aLog, ChaveTitulo() + ": título de outra filial. Acesse a filial " + AllTrim(aSel[nI][MRK_FILIAL]) + " para conciliar.")
+            Loop
+        EndIf
+
+        cMsg := ""
+        Try
+            cMsg := U_PXRSConcilia(aSel[nI][MRK_RECNO], jCfg)
+        Catch oErro
+            cMsg := "erro inesperado na conciliação: " + oErro:Description
+            U_PXRSLog("ERROR", "ProcessaConciliacao: " + cMsg)
+        EndTry
+
+        SE2->(DbGoTo(aSel[nI][MRK_RECNO]))
+        If Empty(cMsg)
+            nOk++
+        Else
+            aAdd(aLog, ChaveTitulo() + ": " + cMsg)
+        EndIf
+
+        If InTransact()
+            aAdd(aLog, "Processamento interrompido: transação aberta após o título acima. " + ;
+                       "Os títulos restantes não foram conciliados.")
+            U_PXRSLog("ERROR", "ProcessaConciliacao: transação aberta após " + ChaveTitulo())
+            Exit
         EndIf
     Next nI
 Return nOk

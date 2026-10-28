@@ -2,7 +2,8 @@
 #include "totvs.ch"
 
 #define RS_PARAM_LOAD "PXFINR25"
-#define RS_RISCO_SIM  "S"
+#define RS_RISCO_SIM   "S"
+#define RS_PROCESSANDO "9"
 
 // Posições do array de parâmetros (ParamBox)
 #define PAR_FILDE     1
@@ -19,7 +20,7 @@ Totais por lote e geral.
 
 Parâmetros (ParamBox - última seleção salva por usuário, sem dependência de SX1):
   01 Filial de / 02 Filial até / 03 Lote de / 04 Lote até /
-  05 Situação (1=Todas;2=Disponível;3=Antecipado;4=Em aberto)
+  05 Situação (1=Todas;2=Disponível;3=Antecipado;4=Em aberto;5=Em processamento)
 
 @type user function
 @author bacoetrom
@@ -60,7 +61,7 @@ Static Function Parametros() as array
     Local nTamFil   := TamSX3("E2_FILIAL")[1] as numeric
     Local nTamLote  := TamSX3("E2_XLOTRS")[1] as numeric
 
-    aSituacao := {"1-Todas", "2-Disponível", "3-Antecipado", "4-Em aberto"}
+    aSituacao := {"1-Todas", "2-Disponível", "3-Antecipado", "4-Em aberto", "5-Em processamento"}
 
     aAdd(aPergs, {1, "Filial de" , Space(nTamFil)          , "@!", ".T.", "SM0", ".T.", 50, .F.})
     aAdd(aPergs, {1, "Filial até", Replicate("Z", nTamFil) , "@!", ".T.", "SM0", ".T.", 50, .T.})
@@ -190,6 +191,9 @@ Static Function ReportPrint(oReport as object, cAlias as character, aPar as arra
     If nSituac >= 2 .And. nSituac <= 4
         cQuery += "   AND SE2.E2_XSTRIC = ? "
         aAdd(aBind, cValToChar(nSituac - 1))
+    ElseIf nSituac == 5
+        cQuery += "   AND SE2.E2_XSTRIC = ? "
+        aAdd(aBind, RS_PROCESSANDO)
     EndIf
     cQuery += " ORDER BY SE2.E2_FILIAL, SE2.E2_XLOTRS, SE2.E2_PREFIXO, SE2.E2_NUM, SE2.E2_PARCELA, SE2.E2_TIPO "
 

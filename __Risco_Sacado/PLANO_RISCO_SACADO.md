@@ -47,16 +47,17 @@ Disponível ──► Antecipado ──► baixa o SE2 do fornecedor + gera SE2 
 | REQ-002 | Marcar Todos, Desmarcar Todos e Inverter (também com clique no cabeçalho) | `MarcaTodos` (sem alteração) |
 | REQ-003 | **Disponibilizar**: um lote por filial (`GetSXENum("SE2","E2_XLOTRS")`), grava `E2_XLOTRS`, `E2_XBANCO`, `E2_XRISCO='S'`, `E2_XDTRISC`, `E2_XSTRIC='1'`. Só para títulos elegíveis (REQ-004) | `AcaoDisponibilizar`/`ProcessaLote` |
 | REQ-004 | Elegível: `E2_SALDO = E2_VALOR` (sem baixa parcial), fora de borderô (`E2_NUMBOR` vazio), sem liberação pendente, tipo diferente de `PA`, `NDF`, `PR`, abatimentos (`-` na 3ª posição) e impostos (`TX`, `ISS`, `INS`), e fornecedor diferente do fornecedor do banco | `ValidaElegivel` |
-| REQ-005 | **Antecipado** (1 → 2), por título e numa única transação: (a) baixa total do SE2 do fornecedor com o motivo `MV_XRSMOT` (não movimenta banco); (b) inclusão do SE2 do banco; (c) grava `E2_XSTRIC='2'` e `E2_XDTANT`. Se qualquer passo falhar, `DisarmTransaction()` desfaz o título inteiro e o processamento segue para o próximo | `AcaoAntecipado` → `U_PXRSAntecipa` |
+| REQ-005 | **Antecipado** (1 → 2), por título, em passos conferidos no banco de dados: (0) grava `E2_XSTRIC='9'` (Em processamento); (a) baixa total do SE2 do fornecedor com o motivo `MV_XRSMOT` (não movimenta banco); (b) inclusão do SE2 do banco; (c) grava `E2_XSTRIC='2'` e `E2_XDTANT`. **Não existe transação envolvendo os ExecAuto** — ver "Atomicidade" na seção de riscos: a falha de um passo dispara a **compensação** (exclui o SE2 do banco se existir e cancela a baixa), e se a compensação falhar o título fica em `9` para a ação **Conciliar**. O processamento segue para o próximo título, salvo se sobrar transação aberta | `AcaoAntecipado` → `U_PXRSAntecipa` → `ExecutaAntecipa`/`CompensaFalha` |
 | REQ-006 | SE2 do banco: fornecedor `A6_XFORN`/`A6_XLOJA`, prefixo `MV_XRSPRF`, número = lote + sequência (`ProximoNumero`, sob `LockByName` do lote), tipo `MV_XRSTIP`, natureza `MV_XRSNAT`, emissão = data da antecipação, vencimento = `E2_VENCTO`/`E2_VENCREA` do original, valor = **valor líquido efetivamente baixado** do original (`E2_SALDO` antes da baixa menos as retenções geradas na baixa, lidas do `FK2_VALOR`/SE5 da baixa; ver RISK-001), histórico com fornecedor/título de origem, `E2_XORIRS` = chave do original e entidades contábeis copiadas | `U_PXRSGeraPagarBanco` |
 | REQ-007 | **Em aberto** (1 → 3): só muda a situação. A partir daí o título não tem restrição | `AcaoSituacao` |
-| REQ-008 | **Estornar Situação**: 3 → 1, só sem baixa e fora de borderô desde o envio. 2 → 1 só se o SE2 do banco estiver sem baixa e fora de borderô: exclui o SE2 do banco (`FINA050` 5) e cancela a baixa do fornecedor (`FINA080` 5) na mesma transação | `AcaoEstorno` → `U_PXRSEstornaAntecipacao` |
+| REQ-008 | **Estornar Situação**: 3 → 1, só sem baixa e fora de borderô desde o envio. 2 → 1 só se o SE2 do banco estiver sem baixa e fora de borderô: grava `9`, exclui o SE2 do banco (`FINA050` 5), cancela a baixa do fornecedor (`FINA080` 5) e grava `1`. Cada passo é conferido no banco de dados; sem transação envolvendo os ExecAuto (mesmo motivo do REQ-005). Falha no meio deixa o título em `9` para a ação **Conciliar** | `AcaoEstorno` → `U_PXRSEstornaAntecipacao` → `DesfazAntecipa` |
 | REQ-009 | **Excluir Lote**: devolve para "sem risco" os títulos do lote, só se nenhum estiver `2` (Antecipado) ou com movimento após o envio | `AcaoExcluirLote` |
-| REQ-010 | **Bloqueio fora da rotina**, para títulos com `E2_XRISCO='S'` e `E2_XSTRIC` `1` ou `2`: baixa (todas as origens), cancelamento/exclusão da baixa, borderô, alteração e exclusão | PEs da seção 3 + `U_PXRSBloqueia` |
+| REQ-010 | **Bloqueio fora da rotina**, para títulos com `E2_XRISCO='S'` e `E2_XSTRIC` `1`, `2` ou `9`: baixa (todas as origens), cancelamento/exclusão da baixa, borderô, alteração e exclusão | PEs da seção 3 + `U_PXRSBloqueia` |
 | REQ-011 | **Proteção do SE2 do banco** (`E2_XORIRS` preenchido): exclusão e alteração bloqueadas fora da rotina. Baixa, borderô e CNAB do SE2 do banco ficam **liberados** (é o pagamento ao banco) | `FA050UPD` |
-| REQ-012 | Os PEs liberam os ExecAuto da própria rotina por `U_PXRSEmRotina()` = `FwIsInCallStack("U_PXRSANTECIPA")` ou `FwIsInCallStack("U_PXRSESTORNAANTECIPACAO")`, sem variável Private | `PXFINA37S` |
+| REQ-012 | Os PEs liberam os ExecAuto da própria rotina por `U_PXRSEmRotina()` = `FwIsInCallStack("U_PXRSANTECIPA")`, `FwIsInCallStack("U_PXRSESTORNAANTECIPACAO")` ou `FwIsInCallStack("U_PXRSCONCILIA")`, sem variável Private | `PXFINA37S` |
 | REQ-013 | Ações por seleção individual ou por lote (filtro Lote de/até + Marcar Todos) | `PXFINA37` |
 | REQ-014 | Relatório do lote com totais por situação e o título do banco gerado | `PXFINR25` |
+| REQ-015 | **Conciliar**: resolve o título cuja antecipação ficou incompleta, decidindo pelo estado real dos registros — baixa + SE2 do banco presentes → grava `2`; baixa sem SE2 do banco → gera o SE2 do banco e grava `2`; demais casos → desfaz o que existir e grava `1`. Idempotente e também aplicável aos títulos que ficaram inconsistentes antes desta correção. O filtro `6-Inconsistentes` da tela lista os candidatos (`9`, `2` sem baixa, `1` já baixado) | `AcaoConcilia` → `U_PXRSConcilia` → `ConcluiAntecipa`/`DesfazAntecipa` |
 
 ### Domínio `E2_XSTRIC`
 
@@ -65,6 +66,7 @@ Disponível ──► Antecipado ──► baixa o SE2 do fornecedor + gera SE2 
 | `1` | Disponível | **Bloqueado** |
 | `2` | Antecipado | **Bloqueado** (o original já está baixado; cancelar a baixa ou excluir também é bloqueado) |
 | `3` | Em aberto | Liberado (fluxo normal) |
+| `9` | Em processamento | **Bloqueado** (antecipação ou estorno interrompido e sem compensação possível; resolver pela ação Conciliar) |
 
 ```text
 (sem risco) --Disponibilizar--> 1 --Antecipado--> 2   (baixa SE2 fornecedor + gera SE2 banco)
@@ -95,7 +97,11 @@ A regra fica centralizada em `U_PXRSBloqueia(cOperacao) → cMsg`, com o SE2 pos
 - Arquivos em TLPP com `tlpp-core.th` + `totvs.ch`, codificação CP-1252, sem `IIF`, sem `Function` pública e sem `ConOut`. O log usa `FWLogMsg`, grupo `RISCOSACADO`.
 - Nome do arquivo de cada PE = nome do PE, sem prefixo `U_` na declaração.
 - As queries usam `FWExecStatement` com parâmetros (bind), `D_E_L_E_T_` e filtro de filial.
-- Nenhuma interface dentro de `Begin Transaction` ou do commit do MVC. Os erros de cada título vão para o array de log, exibido **depois** da transação. Nos PEs, os erros vão para `SetErrorMessage` (MVC), `Help` (tela) ou `AutoGrLog` (ExecAuto/`IsBlind()`).
+- Nenhuma interface dentro de `Begin Transaction` ou do commit do MVC. Os erros de cada título vão para o array de log, exibido **depois** do processamento. Nos PEs, os erros vão para `SetErrorMessage` (MVC), `Help` (tela) ou `AutoGrLog` (ExecAuto/`IsBlind()`).
+- **Nenhum `Begin Transaction` próprio envolvendo `MsExecAuto`.** As transações próprias existem só onde a rotina grava os campos `X` da SE2 (`U_PXRSMarcaStatus`, Disponibilizar, Em aberto, Excluir Lote) — blocos curtos, sem ExecAuto e sem interface.
+- O sucesso de cada passo é confirmado pelo **estado dos registros** (`U_PXRSEstadoTitulo`), não só por `lMsErroAuto`: divergência entre o retorno do ExecAuto e o banco de dados é tratada como falha.
+- As ações verificam `InTransact()` antes de começar (não executam ExecAuto dentro de transação de terceiros) e após cada título no laço: transação aberta interrompe o processamento, para não efetivar gravações pendentes do título anterior.
+- O semáforo do lote (`LockByName`) só é liberado quando foi realmente obtido, e a liberação é garantida em todos os caminhos de saída, inclusive no `Catch`.
 - `SuperGetMV` é lido **uma vez**, antes dos laços (parâmetros carregados num JSON `jCfg` no início da ação).
 - A marca do browse fica em `FWTemporaryTable` (`TR_OK`). O `E2_OK` não é usado.
 - Não há troca de `cFilAnt`. As ações processam a filial do título com `xFilial("SE2", cFilTit)`. O ExecAuto `FINA080`/`FINA050` roda na filial logada, então a tela **só permite Antecipar/Estornar títulos da filial logada** (os demais vão para o log). Disponibilizar e Em aberto, que só gravam campos `X`, continuam multi-filial.
@@ -131,7 +137,9 @@ Ligue `MV_XRSLOG = .T.`: o `FINM020` registra no log (`RISCOSACADO`) o ID, FunNa
 | VAL-003 | O cancelamento/exclusão da baixa passa pelo `FINM020` com operação DELETE ou `FK2_TPDOC='ES'` | Ajustar `OperacaoBaixa` ou usar PE de cancelamento do FINA080 |
 | VAL-004 | O ExecAuto `FINA080` com `AUTMOTBX = MV_XRSMOT` baixa sem gerar movimento bancário (SE5 sem banco, FK5 inexistente) | Revisar a configuração do motivo de baixa |
 | VAL-005 | `U_PXRSEmRotina()` retorna `.T.` nos PEs durante os ExecAuto da rotina (nome na pilha `U_PXRSANTECIPA`) | Ajustar o nome consultado na pilha |
-| VAL-006 | `DisarmTransaction()` desfaz por inteiro a baixa + inclusão do SE2 do banco | Validar tudo antes e gravar sem erro esperado |
+| VAL-006 | ~~`DisarmTransaction()` desfaz por inteiro a baixa + inclusão do SE2 do banco~~ — **reprovado em produção (2026-10-28)**: na falha da inclusão, a baixa permaneceu gravada, o SE2 do banco não foi criado e o `E2_XSTRIC` continuou em `1`, com a mensagem de erro correta no log. O `End Transaction` do próprio `FINA080` encerra a transação ao final da baixa, portanto o `DisarmTransaction()` posterior não tem o que desfazer. Resolvido pela compensação + situação `9` + ação Conciliar | Não aplicável — abordagem substituída (ver REQ-005 e `plan/refactor-risco-sacado-antecipacao-1.md`) |
+| VAL-011 | A compensação (`FINA080` opção 5) cancela a baixa da antecipação logo após a falha da inclusão, inclusive com retenções geradas na baixa (RISK-001) | Título permanece em `9` e é resolvido manualmente pela ação Conciliar / Contas a Pagar |
+| VAL-012 | `InTransact()` retorna `.F.` após o retorno de `BaixaOriginal` (confirma que o padrão encerrou a transação) — registrado no log `RISCOSACADO` a cada antecipação | Reavaliar o desenho se o comportamento mudar de release |
 | VAL-007 | `F240TIT` impede a marcação no borderô (individual, inverter e marcar todos; FINA240 e FINA241) | Filtro no `F240FIL` |
 | VAL-009 | `E2_VALLIQ` após a baixa do ExecAuto traz o líquido (com e sem PCC na baixa) | Ler o valor de FK2/SE5 da baixa |
 | VAL-010 | `ChangeQuery` converte `\|\|` (concatenação) no JOIN do `PXFINR25` para o banco em uso | Montar a chave com `CONCAT` ou ler o título do banco por função |
@@ -148,8 +156,11 @@ Ligue `MV_XRSLOG = .T.`: o `FINM020` registra no log (`RISCOSACADO`) o ID, FunNa
 | TASK-005 | Criar `FINM020`, `FA080TIT`, `FA050UPD`, `F240TIT` | ✅ |
 | TASK-006 | Remover `FINM010`/`FA070TIT` do projeto | ✅ — falta remover do RPO de testes |
 | TASK-007 | Ajustar `PXFINR25` para SE2 | ✅ |
-| TASK-008 | Compilar (RDMake/TDS) e executar VAL-001 a VAL-008 | ⏳ |
+| TASK-008 | Compilar (RDMake/TDS) e executar VAL-001 a VAL-012 | ⏳ |
 | TASK-009 | Testes de cenário (seção 8) e publicação | ⏳ |
+| TASK-010 | **Correção da atomicidade da antecipação (2026-10-28)**: saga com compensação, situação `9`, conferência no banco de dados, `Try/Catch`, guarda `InTransact()`, correção do `LockByName` e ação **Conciliar**. Fontes: `PXFINA37S`, `PXFINA37`, `PXFINR25` | ✅ — pendente de compilação e teste |
+| TASK-011 | Criar o valor `9` no `X3_CBOX` de `E2_XSTRIC` no ambiente | ⏳ |
+| TASK-012 | Conciliar em homologação/produção os títulos que ficaram inconsistentes antes da TASK-010 (filtro `6-Inconsistentes`) | ⏳ |
 
 ## 7. Dicionário (resumo para o `DICIONARIO.md`)
 
@@ -161,7 +172,7 @@ Ligue `MV_XRSLOG = .T.`: o `FINM020` registra no log (`RISCOSACADO`) o ID, FunNa
 | `E2_XLOTRS` | C 6 | Lote R.Sac. | |
 | `E2_XBANCO` | C 3 | Bco R.Sacad | F3 `SA6` |
 | `E2_XDTRISC` | D 8 | Dt.Env.Bco | |
-| `E2_XSTRIC` | C 1 | Sit.R.Sacad | `1=Disponivel;2=Antecipado;3=Em aberto` |
+| `E2_XSTRIC` | C 1 | Sit.R.Sacad | `1=Disponivel;2=Antecipado;3=Em aberto;9=Em processamento` |
 | `E2_XDTANT` | D 8 | Dt.Antecip. | |
 | `E2_XORIRS` | C 40 | Orig.R.Sac. | Chave do SE2 original: `FILIAL+PREFIXO+NUM+PARCELA+TIPO+FORNECE+LOJA` (só no SE2 do banco) |
 
@@ -191,7 +202,11 @@ Ligue `MV_XRSLOG = .T.`: o `FINM020` registra no log (`RISCOSACADO`) o ID, FunNa
 2. Título `1`: baixa manual, baixa automática, CNAB, compensação, borderô, alteração e exclusão são **bloqueados**, cada um com a mensagem da rotina.
 3. Antecipado: o original fica baixado pelo motivo `RSA`, sem movimento bancário. O SE2 do banco é gerado com fornecedor do banco, natureza `MV_XRSNAT`, prefixo/tipo dos parâmetros, vencimento original e `E2_XORIRS`.
 4. Antecipado com `MV_XRSNAT` vazio ou banco sem fornecedor: título rejeitado e nada gravado (nem baixa).
-5. Antecipado de vários títulos com um erro no meio: só o título com erro é desfeito.
+5. Antecipado de vários títulos com um erro no meio: só o título com erro é desfeito, pela compensação (a baixa é cancelada e o título volta a `1`). Os demais seguem consistentes.
+5b. Erro forçado na inclusão do SE2 do banco (ex.: natureza bloqueada, fornecedor do banco inativo): conferir no banco de dados que a baixa foi **cancelada**, o saldo voltou ao valor original e não sobrou SE2 do banco órfão.
+5c. Falha também na compensação (TX da baixa já movimentado): o título fica em `9`, aparece no filtro `6-Inconsistentes` e a mensagem orienta a ação Conciliar.
+5d. Conciliar nos quatro estados (baixa+banco, baixa sem banco, banco sem baixa, nenhum) e reexecução no mesmo título: idempotente.
+5e. Erro de execução forçado durante a antecipação: a mensagem vem do `Try/Catch`, o lote é liberado (nova tentativa imediata não acusa "em processamento por outro usuário") e o título termina em `1` ou `9`.
 5a. Antecipado de fornecedor com PCC/IR na baixa: TX gerados, SE2 do banco pelo líquido. Estorno exclui os TX; com TX já pago, o estorno é rejeitado.
 6. Título `2`: cancelar ou excluir a baixa do original fora da rotina → **bloqueado**. Excluir ou alterar o SE2 do banco → **bloqueado**. Baixar o SE2 do banco ou colocá-lo em borderô → **permitido**.
 7. Estornar 2 → 1 com o SE2 do banco em aberto: o SE2 do banco é excluído, a baixa do original é cancelada e o título volta a `1`. Com o SE2 do banco baixado ou em borderô → rejeitado.
@@ -228,3 +243,7 @@ Ligue `MV_XRSLOG = .T.`: o `FINM020` registra no log (`RISCOSACADO`) o ID, FunNa
 - **DEC-002 — decidido (2026-10-19):** o retorno do banco (quais títulos foram antecipados) é informado **manualmente** na tela. A importação de arquivo do banco fica fora do escopo.
 - **DEC-003:** os juros/deságio da antecipação são do fornecedor com o banco e não entram no Protheus da empresa. O SE2 do banco usa o valor de face.
 - **RISK-004:** o usuário que gerou o lote ou a antecipação só fica registrado no log do servidor.
+- **RISK-005 (atomicidade da antecipação) — constatado em produção em 2026-10-28:** a baixa (`FINA080`) e a inclusão do SE2 do banco (`FINA050`) **não podem ser executadas numa transação única**. As duas rotinas controlam a própria transação e o `End Transaction` do `FINA080` encerra a transação ao final da baixa; o `DisarmTransaction()` da rotina chamadora, executado depois, não desfaz a baixa. Era isso que deixava o processo "pela metade" (original baixado, SE2 do banco inexistente, `E2_XSTRIC` em `1`, com a mensagem de erro correta no log). Agravante: o `FINA050` tem caminhos de erro que fazem `Return` de dentro da própria transação (`FINA050.PRX` linhas 7847, 7877, 8391 e 8646), dois deles sem desarmar, o que torna o estado da transação imprevisível em outros cenários — por isso o laço interrompe o processamento quando detecta `InTransact()`.
+  - **Consequência aceita:** existe uma janela real em que o banco de dados fica em estado intermediário (entre a baixa e a inclusão). Ela é sinalizada pela situação `9`, bloqueada para qualquer movimentação e resolvida pela compensação automática ou pela ação **Conciliar**.
+  - **Não compensável automaticamente:** quando o cancelamento da baixa falha (RISK-001, TX já movimentado), o título fica em `9` e exige intervenção no Contas a Pagar antes de conciliar.
+- **DEC-004 — decidido (2026-10-28):** manter `E2_VALLIQ` como fonte do valor líquido do SE2 do banco. Confirmado nos fontes do padrão que o `FINA080` grava `E2_VALLIQ := nValPgto` na própria baixa (`FINA080.PRX:4701`, `:10289-10298`), portanto a leitura após a baixa já traz o líquido com as retenções descontadas.

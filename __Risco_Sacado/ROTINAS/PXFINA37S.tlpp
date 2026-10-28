@@ -5,6 +5,7 @@
 #define RS_DISPONIVEL   "1"
 #define RS_ANTECIPADO   "2"
 #define RS_EM_ABERTO    "3"
+#define RS_PROCESSANDO  "9"
 #define RS_TOLERANCIA   0.0049
 #define RS_TAM_SEQ      3
 
@@ -14,9 +15,19 @@ Funções compartilhadas pela tela PXFINA37, pelos pontos de entrada
 (FINM020, FA080TIT, FA050UPD, F240TIT) e pelo relatório PXFINR25.
 
 Domínio do campo E2_XSTRIC:
-  1 = Disponível  (enviado ao banco; movimentação somente pela rotina PXFINA37)
-  2 = Antecipado  (original baixado pela rotina + SE2 gerado para o banco; movimentação somente pela rotina)
-  3 = Em aberto   (fornecedor não antecipou; título segue o fluxo normal)
+  1 = Disponível       (enviado ao banco; movimentação somente pela rotina PXFINA37)
+  2 = Antecipado       (original baixado pela rotina + SE2 gerado para o banco; movimentação somente pela rotina)
+  3 = Em aberto        (fornecedor não antecipou; título segue o fluxo normal)
+  9 = Em processamento (antecipação ou estorno interrompido por erro; resolver pela ação Conciliar da PXFINA37)
+
+Atomicidade da antecipação (1 -> 2) e do estorno (2 -> 1):
+  As rotinas automáticas FINA080 (baixa) e FINA050 (inclusão) controlam a própria transação e o
+  End Transaction do FINA080 encerra a transação ao final da baixa. Por isso NÃO existe transação
+  envolvendo os ExecAuto: a baixa já está efetivada quando a inclusão do título do banco falha, e
+  DisarmTransaction() não teria efeito sobre ela. A rotina grava a situação 9 antes de qualquer
+  ExecAuto, confere cada passo no banco de dados e, quando um passo falha, compensa os passos
+  anteriores. Quando a própria compensação falha, o título permanece na situação 9 e é resolvido
+  pela ação Conciliar (U_PXRSConcilia), que decide pelo estado real dos registros.
 
 Parâmetros:
   MV_XRSNAT - Natureza do título a pagar do banco
@@ -59,6 +70,8 @@ User Function PXRSDescSituacao(cRisco as character, cStatus as character) as cha
             cDesc := "Antecipado"
         ElseIf cStatus == RS_EM_ABERTO
             cDesc := "Em aberto"
+        ElseIf cStatus == RS_PROCESSANDO
+            cDesc := "Em processamento"
         Else
             cDesc := "Risco sem situação"
         EndIf
@@ -240,11 +253,21 @@ User Function PXRSBuscaPagar(cFilTit as character, cChave as character) as numer
 Return nRecno
 
 /*/{Protheus.doc} PXRSAntecipa
-Antecipação de um título Disponível, em uma única transação:
-  1. baixa total do título do fornecedor (ExecAuto FINA080, motivo MV_XRSMOT, sem movimentação bancária);
-  2. inclusão do título a pagar do banco pelo valor líquido baixado (ExecAuto FINA050);
-  3. situação 2 (Antecipado) e data da antecipação no título original.
-Qualquer falha desarma a transação (nada é gravado para o título).
+Antecipação de um título Disponível, em passos conferidos no banco de dados:
+  1. grava a situação 9 (Em processamento) no título original;
+  2. baixa total do título do fornecedor (ExecAuto FINA080, motivo MV_XRSMOT, sem movimentação bancária);
+  3. inclusão do título a pagar do banco pelo valor líquido baixado (ExecAuto FINA050);
+  4. situação 2 (Antecipado) e data da antecipação no título original.
+
+NÃO existe transação envolvendo os ExecAuto: o End Transaction do próprio FINA080 encerra a
+transação ao final da baixa, portanto a baixa já está efetivada quando o passo 3 falha e
+DisarmTransaction() não a desfaria. A falha após a baixa executa a compensação (exclusão do
+título do banco quando existir e cancelamento da baixa - FINA080 opção 5). Quando a compensação
+também falha, o título permanece na situação 9 para a ação Conciliar da rotina PXFINA37.
+
+O número do título do banco é gerado antes da baixa: assim uma falha na numeração não deixa o
+título baixado.
+
 Não usa interface: as mensagens retornam ao chamador.
 @type user function
 @author bacoetrom
@@ -256,16 +279,93 @@ Não usa interface: as mensagens retornam ao chamador.
 User Function PXRSAntecipa(nRecSE2 as numeric, jCfg as json) as character
     Local aArea    := GetArea() as array
     Local aAreaSE2 := SE2->(GetArea()) as array
-    Local aForn    := {} as array
+    Local aForn    := {"", ""} as array
     Local cMsg     := "" as character
     Local cChave   := "" as character
     Local cLock    := "" as character
-    Local nValor   := 0 as numeric
+    Local cNomLock := "" as character
+    Local cNumero  := "" as character
+    Local cFilAux  := "" as character
+    Local cLoteAux := "" as character
+    Local oErro    as object
 
     SE2->(DbGoTo(nRecSE2))
+    cChave   := U_PXRSChaveOrigem()
+    cFilAux  := SE2->E2_FILIAL
+    cLoteAux := SE2->E2_XLOTRS
+
+    If InTransact()
+        cMsg := "antecipação chamada dentro de uma transação aberta. Execute a ação pela rotina Risco Sacado (PXFINA37)."
+        U_PXRSLog("ERROR", "Antecipação abortada (transação aberta): " + AllTrim(cChave))
+    Else
+        cMsg := ValidaAntecipa(jCfg, @aForn)
+    EndIf
+
+    // Serializa a geração do número do título do banco por filial/lote.
+    // cLock só é preenchido quando o semáforo foi realmente obtido.
+    If Empty(cMsg)
+        cNomLock := "PXRS" + AllTrim(cFilAux) + AllTrim(cLoteAux)
+        If LockByName(cNomLock, .T., .F.)
+            cLock := cNomLock
+        Else
+            cMsg := "lote " + AllTrim(cLoteAux) + " em processamento por outro usuário. Tente novamente."
+        EndIf
+    EndIf
+
+    // Numeração antes da baixa: falha aqui não deixa o título baixado
+    If Empty(cMsg)
+        cNumero := ProximoNumero(cFilAux, cLoteAux, jCfg, aForn)
+        If Empty(cNumero)
+            cMsg := "não foi possível gerar o número do título do banco para o lote " + AllTrim(cLoteAux) + ;
+                    " (tamanho de E2_NUM insuficiente ou sequência esgotada)."
+        EndIf
+    EndIf
+
+    If Empty(cMsg)
+        Try
+            cMsg := ExecutaAntecipa(nRecSE2, jCfg, aForn, cNumero, cChave)
+        Catch oErro
+            cMsg := "erro inesperado na antecipação: " + oErro:Description
+            U_PXRSLog("ERROR", "Antecipação " + AllTrim(cChave) + " - " + cMsg)
+            cMsg += CRLF + CompensaFalha(nRecSE2, cChave)
+        EndTry
+    EndIf
+
+    If !Empty(cLock)
+        UnLockByName(cLock, .T., .F.)
+    EndIf
+
+    If Empty(cMsg)
+        U_PXRSLog("INFO", "Antecipado: " + AllTrim(cChave) + " - título do banco " + AllTrim(jCfg["prf"]) + "/" + ;
+                          AllTrim(cNumero) + " - usuário " + AllTrim(UsrRetName(RetCodUsr())))
+    Else
+        U_PXRSLog("WARN", "Antecipação rejeitada: " + AllTrim(cChave) + " - " + cMsg)
+    EndIf
+
+    RestArea(aAreaSE2)
+    RestArea(aArea)
+Return cMsg
+
+/*/{Protheus.doc} ValidaAntecipa
+Valida se o título posicionado na SE2 pode ser antecipado e devolve o fornecedor do banco.
+@type static function
+@author bacoetrom
+@since 28/10/2026
+@param jCfg, json, parâmetros lidos por U_PXRSConfig
+@param aForn, array, recebido por referência (@) e preenchido com {fornecedor, loja} do banco
+@return character, motivo da rejeição ou vazio quando válido
+/*/
+Static Function ValidaAntecipa(jCfg as json, aForn as array) as character
+    Local cMsg   := "" as character
+    Local cChave := "" as character
+
     cChave := U_PXRSChaveOrigem()
 
-    If SE2->(Eof()) .Or. SE2->E2_XRISCO <> RS_RISCO_SIM .Or. SE2->E2_XSTRIC <> RS_DISPONIVEL
+    If SE2->(Eof()) .Or. SE2->E2_XRISCO <> RS_RISCO_SIM
+        cMsg := "título não está em risco sacado."
+    ElseIf SE2->E2_XSTRIC == RS_PROCESSANDO
+        cMsg := "título está Em processamento (antecipação anterior interrompida). Use a ação Conciliar da rotina."
+    ElseIf SE2->E2_XSTRIC <> RS_DISPONIVEL
         cMsg := "título não está Disponível no risco sacado."
     ElseIf SE2->E2_FILIAL <> xFilial("SE2")
         cMsg := "título de outra filial. Acesse a filial " + AllTrim(SE2->E2_FILIAL) + " para antecipar."
@@ -283,57 +383,101 @@ User Function PXRSAntecipa(nRecSE2 as numeric, jCfg as json) as character
             cMsg := "banco '" + AllTrim(SE2->E2_XBANCO) + "' sem fornecedor (A6_XFORN/A6_XLOJA) informado."
         EndIf
     EndIf
-
-    // Serializa a geração do número do título do banco por filial/lote
-    cLock := "PXRS" + AllTrim(SE2->E2_FILIAL) + AllTrim(SE2->E2_XLOTRS)
-    If Empty(cMsg) .And. !LockByName(cLock, .T., .F.)
-        cMsg := "lote " + AllTrim(SE2->E2_XLOTRS) + " em processamento por outro usuário. Tente novamente."
-        cLock := ""
-    EndIf
-
-    If Empty(cMsg)
-        Begin Transaction
-            cMsg := BaixaOriginal(nRecSE2, jCfg)
-
-            If Empty(cMsg)
-                // Valor líquido efetivamente baixado (já descontadas retenções na baixa - RISK-001)
-                SE2->(DbGoTo(nRecSE2))
-                nValor := SE2->E2_VALLIQ
-                If nValor <= 0
-                    cMsg := "valor líquido da baixa não identificado (E2_VALLIQ)."
-                EndIf
-            EndIf
-
-            If Empty(cMsg)
-                cMsg := GeraPagarBanco(nRecSE2, jCfg, aForn, nValor)
-            EndIf
-
-            If Empty(cMsg)
-                SE2->(DbGoTo(nRecSE2))
-                RecLock("SE2", .F.)
-                SE2->E2_XSTRIC := RS_ANTECIPADO
-                SE2->E2_XDTANT := dDataBase
-                SE2->(MsUnlock())
-            Else
-                DisarmTransaction()
-            EndIf
-        End Transaction
-    EndIf
-
-    If !Empty(cLock)
-        UnLockByName(cLock, .T., .F.)
-    EndIf
-
-    If Empty(cMsg)
-        U_PXRSLog("INFO", "Antecipado: " + AllTrim(cChave) + " - valor líquido " + cValToChar(nValor) + ;
-                          " - usuário " + AllTrim(UsrRetName(RetCodUsr())))
-    Else
-        U_PXRSLog("WARN", "Antecipação rejeitada: " + AllTrim(cChave) + " - " + cMsg)
-    EndIf
-
-    RestArea(aAreaSE2)
-    RestArea(aArea)
 Return cMsg
+
+/*/{Protheus.doc} ExecutaAntecipa
+Executa os passos da antecipação, conferindo cada um pelo estado dos registros (U_PXRSEstadoTitulo)
+e não apenas pelo retorno do ExecAuto. Qualquer falha após a baixa dispara a compensação.
+@type static function
+@author bacoetrom
+@since 28/10/2026
+@param nRecSE2, numeric, R_E_C_N_O_ do título do fornecedor
+@param jCfg, json, parâmetros lidos por U_PXRSConfig
+@param aForn, array, {fornecedor, loja} do banco
+@param cNumero, character, número já reservado para o título do banco
+@param cChave, character, chave de origem (U_PXRSChaveOrigem)
+@return character, mensagem de erro ou vazio quando antecipado
+/*/
+Static Function ExecutaAntecipa(nRecSE2 as numeric, jCfg as json, aForn as array, cNumero as character, cChave as character) as character
+    Local cMsg   := "" as character
+    Local nValor := 0 as numeric
+    Local jEst   as json
+
+    cMsg := U_PXRSMarcaStatus(nRecSE2, RS_PROCESSANDO, Nil)
+    If !Empty(cMsg)
+        Return cMsg
+    EndIf
+
+    cMsg := BaixaOriginal(nRecSE2, jCfg)
+    jEst := U_PXRSEstadoTitulo(nRecSE2)
+    U_PXRSLog("INFO", "Antecipação " + AllTrim(cChave) + " - passo baixa: erro='" + AllTrim(cMsg) + ;
+                      "' baixaTotal=" + cValToChar(jEst["baixa"]) + " transacaoAberta=" + cValToChar(InTransact()))
+
+    If Empty(cMsg) .And. !jEst["baixa"]
+        cMsg := "a baixa do título do fornecedor não foi confirmada no banco de dados."
+    EndIf
+
+    // Valor líquido efetivamente baixado: o FINA080 grava E2_VALLIQ na própria baixa
+    If Empty(cMsg)
+        SE2->(DbGoTo(nRecSE2))
+        nValor := SE2->E2_VALLIQ
+        If nValor <= 0
+            cMsg := "valor líquido da baixa não identificado (E2_VALLIQ)."
+        EndIf
+    EndIf
+
+    If Empty(cMsg)
+        cMsg := GeraPagarBanco(nRecSE2, jCfg, aForn, nValor, cNumero)
+        jEst := U_PXRSEstadoTitulo(nRecSE2)
+        U_PXRSLog("INFO", "Antecipação " + AllTrim(cChave) + " - passo título do banco: erro='" + AllTrim(cMsg) + ;
+                          "' recnoBanco=" + cValToChar(jEst["recbco"]) + " transacaoAberta=" + cValToChar(InTransact()))
+        If Empty(cMsg) .And. jEst["recbco"] == 0
+            cMsg := "o título a pagar do banco não foi confirmado no banco de dados."
+        EndIf
+    EndIf
+
+    If !Empty(cMsg)
+        Return cMsg + CRLF + CompensaFalha(nRecSE2, cChave)
+    EndIf
+
+    cMsg := U_PXRSMarcaStatus(nRecSE2, RS_ANTECIPADO, dDataBase)
+    If !Empty(cMsg)
+        cMsg += " A baixa e o título do banco foram gravados; o título permanece Em processamento." + ;
+                " Use a ação Conciliar da rotina Risco Sacado."
+    EndIf
+Return cMsg
+
+/*/{Protheus.doc} CompensaFalha
+Compensa uma antecipação interrompida e devolve o texto do resultado para a mensagem do usuário.
+Protegida por Try/Catch própria porque também é chamada de dentro do Catch da antecipação, onde
+uma nova exceção não seria capturada.
+@type static function
+@author bacoetrom
+@since 28/10/2026
+@param nRecSE2, numeric, R_E_C_N_O_ do título do fornecedor
+@param cChave, character, chave de origem (U_PXRSChaveOrigem)
+@return character, texto descrevendo o resultado da compensação
+/*/
+Static Function CompensaFalha(nRecSE2 as numeric, cChave as character) as character
+    Local cTexto := "" as character
+    Local cMsg   := "" as character
+    Local oErro  as object
+
+    Try
+        cMsg := DesfazAntecipa(nRecSE2, cChave)
+    Catch oErro
+        cMsg := "erro inesperado ao desfazer a antecipação: " + oErro:Description
+    EndTry
+
+    If Empty(cMsg)
+        cTexto := "A antecipação foi desfeita: o título voltou para Disponível."
+        U_PXRSLog("INFO", "Compensação concluída: " + AllTrim(cChave))
+    Else
+        cTexto := "ATENÇÃO: não foi possível desfazer a antecipação (" + AllTrim(cMsg) + ")." + ;
+                  " O título permanece Em processamento - use a ação Conciliar da rotina Risco Sacado."
+        U_PXRSLog("ERROR", "Compensação falhou: " + AllTrim(cChave) + " - " + cMsg)
+    EndIf
+Return cTexto
 
 /*/{Protheus.doc} PXRSValidaEstorno
 Valida se o título a pagar do banco pode ser excluído no estorno da antecipação.
@@ -362,11 +506,13 @@ User Function PXRSValidaEstorno(nRecBco as numeric) as character
 Return cMsg
 
 /*/{Protheus.doc} PXRSEstornaAntecipacao
-Estorna a antecipação (2 -> 1), em uma única transação:
-  1. exclui o título a pagar do banco (ExecAuto FINA050);
-  2. cancela a baixa do título do fornecedor (ExecAuto FINA080);
-  3. volta a situação para 1 (Disponível).
-Qualquer falha desarma a transação. Não usa interface.
+Estorna a antecipação (2 -> 1), em passos conferidos no banco de dados:
+  1. grava a situação 9 (Em processamento);
+  2. exclui o título a pagar do banco (ExecAuto FINA050 opção 5);
+  3. cancela a baixa do título do fornecedor (ExecAuto FINA080 opção 5);
+  4. volta a situação para 1 (Disponível).
+Pelos mesmos motivos da antecipação, não há transação envolvendo os ExecAuto. Quando um passo
+falha, o título permanece na situação 9 e é resolvido pela ação Conciliar. Não usa interface.
 @type user function
 @author bacoetrom
 @since 19/10/2026
@@ -378,47 +524,42 @@ User Function PXRSEstornaAntecipacao(nRecSE2 as numeric) as character
     Local aAreaSE2 := SE2->(GetArea()) as array
     Local cMsg     := "" as character
     Local cChave   := "" as character
-    Local nRecBco  := 0 as numeric
+    Local jEst     as json
+    Local oErro    as object
 
-    SE2->(DbGoTo(nRecSE2))
-    cChave := U_PXRSChaveOrigem()
+    jEst   := U_PXRSEstadoTitulo(nRecSE2)
+    cChave := jEst["chave"]
 
-    If SE2->(Eof()) .Or. SE2->E2_XRISCO <> RS_RISCO_SIM .Or. SE2->E2_XSTRIC <> RS_ANTECIPADO
+    If InTransact()
+        cMsg := "estorno chamado dentro de uma transação aberta. Execute a ação pela rotina Risco Sacado (PXFINA37)."
+        U_PXRSLog("ERROR", "Estorno abortado (transação aberta): " + AllTrim(cChave))
+    ElseIf SE2->(Eof()) .Or. SE2->E2_XRISCO <> RS_RISCO_SIM .Or. SE2->E2_XSTRIC <> RS_ANTECIPADO
         cMsg := "título não está Antecipado no risco sacado."
     ElseIf SE2->E2_FILIAL <> xFilial("SE2")
         cMsg := "título de outra filial. Acesse a filial " + AllTrim(SE2->E2_FILIAL) + " para estornar."
-    Else
-        nRecBco := U_PXRSBuscaPagar(SE2->E2_FILIAL, cChave)
-        If nRecBco > 0
-            cMsg := U_PXRSValidaEstorno(nRecBco)
-        EndIf
+    ElseIf jEst["recbco"] > 0
+        cMsg := U_PXRSValidaEstorno(jEst["recbco"])
     EndIf
 
     If Empty(cMsg)
-        Begin Transaction
-            If nRecBco > 0
-                cMsg := ExcluiPagarBanco(nRecBco)
-            EndIf
-
+        Try
+            cMsg := U_PXRSMarcaStatus(nRecSE2, RS_PROCESSANDO, Nil)
             If Empty(cMsg)
-                cMsg := CancelaBaixaOriginal(nRecSE2)
+                cMsg := DesfazAntecipa(nRecSE2, cChave)
             EndIf
-
-            If Empty(cMsg)
-                SE2->(DbGoTo(nRecSE2))
-                RecLock("SE2", .F.)
-                SE2->E2_XSTRIC := RS_DISPONIVEL
-                SE2->E2_XDTANT := CtoD("")
-                SE2->(MsUnlock())
-            Else
-                DisarmTransaction()
-            EndIf
-        End Transaction
+        Catch oErro
+            cMsg := "erro inesperado no estorno da antecipação: " + oErro:Description
+            U_PXRSLog("ERROR", "Estorno " + AllTrim(cChave) + " - " + cMsg)
+        EndTry
     EndIf
 
     If Empty(cMsg)
         U_PXRSLog("INFO", "Antecipação estornada: " + AllTrim(cChave) + " - usuário " + AllTrim(UsrRetName(RetCodUsr())))
     Else
+        jEst := U_PXRSEstadoTitulo(nRecSE2)
+        If jEst["status"] == RS_PROCESSANDO
+            cMsg += CRLF + "O título permanece Em processamento - use a ação Conciliar da rotina Risco Sacado."
+        EndIf
         U_PXRSLog("WARN", "Estorno da antecipação rejeitado: " + AllTrim(cChave) + " - " + cMsg)
     EndIf
 
@@ -426,21 +567,222 @@ User Function PXRSEstornaAntecipacao(nRecSE2 as numeric) as character
     RestArea(aArea)
 Return cMsg
 
+/*/{Protheus.doc} PXRSConcilia
+Resolve um título cuja antecipação ficou incompleta, decidindo pelo estado real dos registros
+(baixa do fornecedor e existência do título a pagar do banco):
+  - baixa presente e título do banco presente -> grava a situação 2 (Antecipado);
+  - baixa presente e título do banco ausente  -> gera o título do banco e grava a situação 2;
+  - demais casos                              -> desfaz o que existir e grava a situação 1.
+Idempotente: executar de novo em um título já consistente não altera nada.
+Atende também os títulos que ficaram inconsistentes antes da correção da rotina.
+@type user function
+@author bacoetrom
+@since 28/10/2026
+@param nRecSE2, numeric, R_E_C_N_O_ do título do fornecedor
+@param jCfg, json, parâmetros lidos por U_PXRSConfig
+@return character, mensagem de erro ou vazio quando conciliado
+/*/
+User Function PXRSConcilia(nRecSE2 as numeric, jCfg as json) as character
+    Local aArea    := GetArea() as array
+    Local aAreaSE2 := SE2->(GetArea()) as array
+    Local cMsg     := "" as character
+    Local cChave   := "" as character
+    Local dDtAnt   := CtoD("") as date
+    Local jEst     as json
+    Local oErro    as object
+
+    jEst   := U_PXRSEstadoTitulo(nRecSE2)
+    cChave := jEst["chave"]
+
+    If InTransact()
+        cMsg := "conciliação chamada dentro de uma transação aberta. Execute a ação pela rotina Risco Sacado (PXFINA37)."
+        U_PXRSLog("ERROR", "Conciliação abortada (transação aberta): " + AllTrim(cChave))
+    ElseIf SE2->(Eof()) .Or. SE2->E2_XRISCO <> RS_RISCO_SIM
+        cMsg := "título não está em risco sacado."
+    ElseIf !Empty(SE2->E2_XORIRS)
+        cMsg := "título a pagar do banco não é conciliado; selecione o título do fornecedor."
+    ElseIf jEst["status"] == RS_EM_ABERTO
+        cMsg := "título está Em aberto; a conciliação trata apenas Disponível, Antecipado e Em processamento."
+    ElseIf SE2->E2_FILIAL <> xFilial("SE2")
+        cMsg := "título de outra filial. Acesse a filial " + AllTrim(SE2->E2_FILIAL) + " para conciliar."
+    EndIf
+
+    If Empty(cMsg)
+        U_PXRSLog("INFO", "Conciliação - estado de " + AllTrim(cChave) + ": situação '" + jEst["status"] + ;
+                          "' baixaTotal=" + cValToChar(jEst["baixa"]) + " movBaixa=" + cValToChar(jEst["movbaixa"]) + ;
+                          " recnoBanco=" + cValToChar(jEst["recbco"]))
+        Try
+            If jEst["baixa"] .And. jEst["recbco"] > 0
+                SE2->(DbGoTo(nRecSE2))
+                dDtAnt := SE2->E2_XDTANT
+                If Empty(dDtAnt)
+                    dDtAnt := dDataBase
+                EndIf
+                cMsg := U_PXRSMarcaStatus(nRecSE2, RS_ANTECIPADO, dDtAnt)
+            ElseIf jEst["baixa"]
+                cMsg := ConcluiAntecipa(nRecSE2, jCfg, cChave)
+            Else
+                cMsg := DesfazAntecipa(nRecSE2, cChave)
+            EndIf
+        Catch oErro
+            cMsg := "erro inesperado na conciliação: " + oErro:Description
+            U_PXRSLog("ERROR", "Conciliação " + AllTrim(cChave) + " - " + cMsg)
+        EndTry
+    EndIf
+
+    If Empty(cMsg)
+        U_PXRSLog("INFO", "Conciliado: " + AllTrim(cChave) + " - usuário " + AllTrim(UsrRetName(RetCodUsr())))
+    Else
+        U_PXRSLog("WARN", "Conciliação não concluída: " + AllTrim(cChave) + " - " + cMsg)
+    EndIf
+
+    RestArea(aAreaSE2)
+    RestArea(aArea)
+Return cMsg
+
+/*/{Protheus.doc} DesfazAntecipa
+Desfaz a antecipação do título: exclui o título a pagar do banco (quando existir), cancela a
+baixa do fornecedor (quando houver movimento de baixa) e grava a situação 1 (Disponível).
+Cada passo é conferido no banco de dados antes do seguinte.
+@type static function
+@author bacoetrom
+@since 28/10/2026
+@param nRecSE2, numeric, R_E_C_N_O_ do título do fornecedor
+@param cChave, character, chave de origem (U_PXRSChaveOrigem)
+@return character, mensagem de erro ou vazio quando desfeito
+/*/
+Static Function DesfazAntecipa(nRecSE2 as numeric, cChave as character) as character
+    Local cMsg := "" as character
+    Local jEst as json
+
+    jEst := U_PXRSEstadoTitulo(nRecSE2)
+
+    If jEst["recbco"] > 0
+        cMsg := U_PXRSValidaEstorno(jEst["recbco"])
+
+        If Empty(cMsg)
+            cMsg := ExcluiPagarBanco(jEst["recbco"])
+            jEst := U_PXRSEstadoTitulo(nRecSE2)
+            If Empty(cMsg) .And. jEst["recbco"] > 0
+                cMsg := "a exclusão do título a pagar do banco não foi confirmada no banco de dados."
+            EndIf
+        EndIf
+    EndIf
+
+    If Empty(cMsg) .And. jEst["movbaixa"]
+        cMsg := CancelaBaixaOriginal(nRecSE2)
+        jEst := U_PXRSEstadoTitulo(nRecSE2)
+        U_PXRSLog("INFO", "Desfazer antecipação " + AllTrim(cChave) + " - cancelamento da baixa: erro='" + ;
+                          AllTrim(cMsg) + "' movBaixa=" + cValToChar(jEst["movbaixa"]))
+        If Empty(cMsg) .And. jEst["movbaixa"]
+            cMsg := "o cancelamento da baixa do título do fornecedor não foi confirmado no banco de dados."
+        EndIf
+    EndIf
+
+    If Empty(cMsg)
+        cMsg := U_PXRSMarcaStatus(nRecSE2, RS_DISPONIVEL, Nil)
+    EndIf
+
+    If Empty(cMsg)
+        U_PXRSLog("INFO", "Antecipação desfeita: " + AllTrim(cChave))
+    EndIf
+Return cMsg
+
+/*/{Protheus.doc} ConcluiAntecipa
+Conclui uma antecipação que já tem a baixa gravada e está sem o título a pagar do banco: gera o
+título do banco pelo valor líquido da baixa (E2_VALLIQ) e grava a situação 2 (Antecipado).
+@type static function
+@author bacoetrom
+@since 28/10/2026
+@param nRecSE2, numeric, R_E_C_N_O_ do título do fornecedor
+@param jCfg, json, parâmetros lidos por U_PXRSConfig
+@param cChave, character, chave de origem (U_PXRSChaveOrigem)
+@return character, mensagem de erro ou vazio quando concluído
+/*/
+Static Function ConcluiAntecipa(nRecSE2 as numeric, jCfg as json, cChave as character) as character
+    Local aForn    := {"", ""} as array
+    Local cMsg     := "" as character
+    Local cLock    := "" as character
+    Local cNomLock := "" as character
+    Local cNumero  := "" as character
+    Local cFilAux  := "" as character
+    Local cLoteAux := "" as character
+    Local cBcoAux  := "" as character
+    Local nValor   := 0 as numeric
+    Local jEst     as json
+
+    SE2->(DbGoTo(nRecSE2))
+    cFilAux  := SE2->E2_FILIAL
+    cLoteAux := SE2->E2_XLOTRS
+    cBcoAux  := SE2->E2_XBANCO
+    nValor   := SE2->E2_VALLIQ
+
+    cMsg := U_PXRSValidaConfig(jCfg, cFilAux)
+
+    If Empty(cMsg)
+        aForn := U_PXRSFornBanco(cFilAux, cBcoAux)
+        If Empty(aForn[1])
+            cMsg := "banco '" + AllTrim(cBcoAux) + "' sem fornecedor (A6_XFORN/A6_XLOJA) informado."
+        EndIf
+    EndIf
+
+    If Empty(cMsg) .And. nValor <= 0
+        cMsg := "valor líquido da baixa não identificado (E2_VALLIQ)."
+    EndIf
+
+    If Empty(cMsg)
+        cNomLock := "PXRS" + AllTrim(cFilAux) + AllTrim(cLoteAux)
+        If LockByName(cNomLock, .T., .F.)
+            cLock := cNomLock
+        Else
+            cMsg := "lote " + AllTrim(cLoteAux) + " em processamento por outro usuário. Tente novamente."
+        EndIf
+    EndIf
+
+    If Empty(cMsg)
+        cNumero := ProximoNumero(cFilAux, cLoteAux, jCfg, aForn)
+        If Empty(cNumero)
+            cMsg := "não foi possível gerar o número do título do banco para o lote " + AllTrim(cLoteAux) + ;
+                    " (tamanho de E2_NUM insuficiente ou sequência esgotada)."
+        EndIf
+    EndIf
+
+    If Empty(cMsg)
+        cMsg := GeraPagarBanco(nRecSE2, jCfg, aForn, nValor, cNumero)
+        jEst := U_PXRSEstadoTitulo(nRecSE2)
+        U_PXRSLog("INFO", "Conciliação " + AllTrim(cChave) + " - geração do título do banco: erro='" + ;
+                          AllTrim(cMsg) + "' recnoBanco=" + cValToChar(jEst["recbco"]))
+        If Empty(cMsg) .And. jEst["recbco"] == 0
+            cMsg := "o título a pagar do banco não foi confirmado no banco de dados."
+        EndIf
+    EndIf
+
+    If !Empty(cLock)
+        UnLockByName(cLock, .T., .F.)
+    EndIf
+
+    If Empty(cMsg)
+        cMsg := U_PXRSMarcaStatus(nRecSE2, RS_ANTECIPADO, dDataBase)
+    EndIf
+Return cMsg
+
 /*/{Protheus.doc} PXRSEmRotina
-Indica se a execução atual partiu da rotina de Risco Sacado (antecipação/estorno),
-liberando os pontos de entrada de bloqueio para os ExecAuto da própria rotina.
+Indica se a execução atual partiu da rotina de Risco Sacado (antecipação, estorno ou
+conciliação), liberando os pontos de entrada de bloqueio para os ExecAuto da própria rotina.
 @type user function
 @author bacoetrom
 @since 19/10/2026
 @return logical, .T. quando chamado pela rotina
 /*/
 User Function PXRSEmRotina() as logical
-Return FwIsInCallStack("U_PXRSANTECIPA") .Or. FwIsInCallStack("U_PXRSESTORNAANTECIPACAO")
+Return FwIsInCallStack("U_PXRSANTECIPA") .Or. FwIsInCallStack("U_PXRSESTORNAANTECIPACAO") .Or. ;
+       FwIsInCallStack("U_PXRSCONCILIA")
 
 /*/{Protheus.doc} PXRSBloqueia
 Regra única de bloqueio de movimentação fora da rotina de Risco Sacado.
 Usada por todos os pontos de entrada. SE2 deve estar posicionado no título.
-  - Título do fornecedor em situação 1 (Disponível) ou 2 (Antecipado): bloqueia qualquer movimentação.
+  - Título do fornecedor em situação 1 (Disponível), 2 (Antecipado) ou 9 (Em processamento):
+    bloqueia qualquer movimentação.
   - Título a pagar do banco (E2_XORIRS preenchido): bloqueia alteração e exclusão.
 @type user function
 @author bacoetrom
@@ -458,7 +800,8 @@ User Function PXRSBloqueia(cOperacao as character) as character
 
     cTitulo := AllTrim(SE2->(E2_PREFIXO + "/" + E2_NUM + "/" + E2_PARCELA + "/" + E2_TIPO))
 
-    If SE2->E2_XRISCO == RS_RISCO_SIM .And. (SE2->E2_XSTRIC == RS_DISPONIVEL .Or. SE2->E2_XSTRIC == RS_ANTECIPADO)
+    If SE2->E2_XRISCO == RS_RISCO_SIM .And. ;
+       (SE2->E2_XSTRIC == RS_DISPONIVEL .Or. SE2->E2_XSTRIC == RS_ANTECIPADO .Or. SE2->E2_XSTRIC == RS_PROCESSANDO)
         cMsg := "Título " + cTitulo + " está em Risco Sacado - " + ;
                 U_PXRSDescSituacao(SE2->E2_XRISCO, SE2->E2_XSTRIC) + " (lote " + AllTrim(SE2->E2_XLOTRS) + "). " + ;
                 "Operação '" + cOperacao + "' permitida somente pela rotina Risco Sacado (PXFINA37)."
@@ -498,7 +841,9 @@ Return SuperGetMV("MV_XRSLOG", .F., .F.)
 /*/{Protheus.doc} BaixaOriginal
 Baixa total do título do fornecedor pela antecipação (ExecAuto FINA080 - opção 3).
 Motivo MV_XRSMOT sem movimentação bancária: não informa banco/agência/conta.
-O valor não é informado (AUTVLRPG): o padrão baixa o saldo e calcula as retenções na baixa.
+O valor não é informado (AUTVLRPG): o padrão baixa o saldo e calcula as retenções na baixa,
+gravando o líquido pago em E2_VALLIQ.
+O retorno não é conclusivo por si: quem chama confere o estado por U_PXRSEstadoTitulo.
 @type static function
 @author bacoetrom
 @since 19/10/2026
@@ -530,20 +875,24 @@ Static Function BaixaOriginal(nRecSE2 as numeric, jCfg as json) as character
     aAdd(aBaixa, {"AUTHIST"     , cHist          , Nil})
 
     oModelBkp := FWModelActive()
-    // FINA080(xAutoCab, nOpc, lNoMBrowse, nOpBaixa, lExibeLanc, lOnline): lExibeLanc .F. evita tela contábil na transação
+    // FINA080(xAutoCab, nOpc, lNoMBrowse, nOpBaixa, lExibeLanc, lOnline): lExibeLanc .F. evita a tela contábil
     MsExecAuto({|a, b, c, d, e| FINA080(a, b, c, d, e)}, aBaixa, 3, Nil, Nil, .F.)
     If ValType(oModelBkp) == "O"
         FWModelActive(oModelBkp)
     EndIf
 
     If lMsErroAuto
+        RollBackSX8()
         cMsg := "falha na baixa do título do fornecedor." + CRLF + MontaErroAuto()
+    Else
+        ConfirmSX8()
     EndIf
 Return cMsg
 
 /*/{Protheus.doc} CancelaBaixaOriginal
 Cancela a baixa da antecipação do título do fornecedor (ExecAuto FINA080 - opção 5).
 O título é elegível somente sem baixa anterior, então a única baixa ativa é a da antecipação.
+O retorno não é conclusivo por si: quem chama confere o estado por U_PXRSEstadoTitulo.
 @type static function
 @author bacoetrom
 @since 19/10/2026
@@ -573,14 +922,19 @@ Static Function CancelaBaixaOriginal(nRecSE2 as numeric) as character
     EndIf
 
     If lMsErroAuto
+        RollBackSX8()
         cMsg := "falha no cancelamento da baixa do título do fornecedor." + CRLF + MontaErroAuto()
+    Else
+        ConfirmSX8()
     EndIf
 Return cMsg
 
 /*/{Protheus.doc} GeraPagarBanco
 Inclui o título a pagar do banco (ExecAuto FINA050 - opção 3).
 Fornecedor A6_XFORN/A6_XLOJA, prefixo MV_XRSPRF, tipo MV_XRSTIP, natureza MV_XRSNAT,
-número = lote + sequência, emissão = data da antecipação, vencimento = do título original.
+emissão = data da antecipação, vencimento = do título original.
+O número é gerado por ProximoNumero antes da baixa e recebido pronto, para que uma falha de
+numeração não deixe o título do fornecedor baixado sem contrapartida.
 @type static function
 @author bacoetrom
 @since 19/10/2026
@@ -588,13 +942,13 @@ número = lote + sequência, emissão = data da antecipação, vencimento = do título
 @param jCfg, json, parâmetros lidos por U_PXRSConfig
 @param aForn, array, {fornecedor, loja} do banco
 @param nValor, numeric, valor líquido baixado do título original
+@param cNumero, character, número já reservado para o título do banco (E2_NUM)
 @return character, mensagem de erro ou vazio quando gerado
 /*/
-Static Function GeraPagarBanco(nRecSE2 as numeric, jCfg as json, aForn as array, nValor as numeric) as character
+Static Function GeraPagarBanco(nRecSE2 as numeric, jCfg as json, aForn as array, nValor as numeric, cNumero as character) as character
     Local aTitulo   := {} as array
     Local aCopia    := {} as array
     Local cMsg      := "" as character
-    Local cNumero   := "" as character
     Local cHist     := "" as character
     Local cChave    := "" as character
     Local nI        := 0 as numeric
@@ -603,11 +957,10 @@ Static Function GeraPagarBanco(nRecSE2 as numeric, jCfg as json, aForn as array,
     Private lAutoErrNoFile := .T.
 
     SE2->(DbGoTo(nRecSE2))
-    cChave  := U_PXRSChaveOrigem()
-    cNumero := ProximoNumero(SE2->E2_FILIAL, SE2->E2_XLOTRS, jCfg, aForn)
+    cChave := U_PXRSChaveOrigem()
+
     If Empty(cNumero)
-        Return "não foi possível gerar o número do título do banco para o lote " + AllTrim(SE2->E2_XLOTRS) + ;
-               " (tamanho de E2_NUM insuficiente ou sequência esgotada)."
+        Return "número do título a pagar do banco não informado."
     EndIf
 
     cHist := "R.SACADO " + AllTrim(SE2->E2_FORNECE) + "/" + AllTrim(SE2->E2_LOJA) + " " + ;
@@ -644,15 +997,18 @@ Static Function GeraPagarBanco(nRecSE2 as numeric, jCfg as json, aForn as array,
     EndIf
 
     If lMsErroAuto
+        RollBackSX8()
         cMsg := "falha ao gerar o título a pagar do banco." + CRLF + MontaErroAuto()
     Else
-        U_PXRSLog("INFO", "Título a pagar do banco gerado: " + AllTrim(jCfg["prf"]) + "/" + cNumero + ;
+        ConfirmSX8()
+        U_PXRSLog("INFO", "Título a pagar do banco gerado: " + AllTrim(jCfg["prf"]) + "/" + AllTrim(cNumero) + ;
                           " fornecedor " + AllTrim(aForn[1]) + "/" + AllTrim(aForn[2]) + " - origem " + AllTrim(cChave))
     EndIf
 Return cMsg
 
 /*/{Protheus.doc} ExcluiPagarBanco
 Exclui o título a pagar do banco (ExecAuto FINA050 - opção 5).
+O retorno não é conclusivo por si: quem chama confere o estado por U_PXRSEstadoTitulo.
 @type static function
 @author bacoetrom
 @since 19/10/2026
@@ -685,8 +1041,10 @@ Static Function ExcluiPagarBanco(nRecBco as numeric) as character
     EndIf
 
     If lMsErroAuto
+        RollBackSX8()
         cMsg := "falha ao excluir o título a pagar do banco " + AllTrim(cChave) + "." + CRLF + MontaErroAuto()
     Else
+        ConfirmSX8()
         U_PXRSLog("INFO", "Título a pagar do banco excluído: " + AllTrim(cChave))
     EndIf
 Return cMsg
@@ -767,3 +1125,80 @@ Static Function MontaErroAuto() as character
         cTexto += AllTrim(aErros[nI]) + CRLF
     Next nI
 Return cTexto
+
+/*/{Protheus.doc} PXRSMarcaStatus
+Grava a situação do risco sacado (E2_XSTRIC) e a data da antecipação (E2_XDTANT) do título.
+Transação curta, somente na SE2, sem ExecAuto e sem interface (CA1002).
+@type user function
+@author bacoetrom
+@since 28/10/2026
+@param nRecSE2, numeric, R_E_C_N_O_ do título
+@param cStatus, character, situação a gravar (RS_DISPONIVEL, RS_ANTECIPADO, RS_EM_ABERTO ou RS_PROCESSANDO)
+@param xDtAnt, variant, data da antecipação; quando não for data, grava data vazia
+@return character, mensagem de erro ou vazio quando gravado
+/*/
+User Function PXRSMarcaStatus(nRecSE2 as numeric, cStatus as character, xDtAnt as variant) as character
+    Local cMsg   := "" as character
+    Local dDtAnt := CtoD("") as date
+    Local oErro  as object
+
+    If ValType(xDtAnt) == "D"
+        dDtAnt := xDtAnt
+    EndIf
+
+    Try
+        SE2->(DbGoTo(nRecSE2))
+        If SE2->(Eof())
+            cMsg := "título não localizado para gravar a situação do risco sacado."
+        Else
+            Begin Transaction
+                RecLock("SE2", .F.)
+                SE2->E2_XSTRIC := cStatus
+                SE2->E2_XDTANT := dDtAnt
+                SE2->(MsUnlock())
+            End Transaction
+        EndIf
+    Catch oErro
+        cMsg := "falha ao gravar a situação '" + cStatus + "' do risco sacado: " + oErro:Description
+        U_PXRSLog("ERROR", cMsg)
+    EndTry
+Return cMsg
+
+/*/{Protheus.doc} PXRSEstadoTitulo
+Estado real do título de risco sacado no banco de dados. Reposiciona a SE2 no registro e relê
+o buffer (DbSkip(0)), porque os ExecAuto gravam pelo próprio workarea e o conteúdo carregado
+antes da chamada fica desatualizado.
+@type user function
+@author bacoetrom
+@since 28/10/2026
+@param nRecSE2, numeric, R_E_C_N_O_ do título do fornecedor
+@return json, estado do título:
+  chave    = chave de origem (U_PXRSChaveOrigem)
+  filial   = filial do título
+  status   = conteúdo de E2_XSTRIC
+  baixa    = .T. quando o título está totalmente baixado
+  movbaixa = .T. quando existe qualquer movimento de baixa (total ou parcial)
+  recbco   = R_E_C_N_O_ do título a pagar do banco da antecipação (0 quando não existe)
+/*/
+User Function PXRSEstadoTitulo(nRecSE2 as numeric) as json
+    Local jEst := JsonObject():New() as json
+
+    SE2->(DbGoTo(nRecSE2))
+    SE2->(DbSkip(0))
+
+    jEst["chave"]    := ""
+    jEst["filial"]   := ""
+    jEst["status"]   := ""
+    jEst["baixa"]    := .F.
+    jEst["movbaixa"] := .F.
+    jEst["recbco"]   := 0
+
+    If !SE2->(Eof())
+        jEst["chave"]    := U_PXRSChaveOrigem()
+        jEst["filial"]   := SE2->E2_FILIAL
+        jEst["status"]   := SE2->E2_XSTRIC
+        jEst["baixa"]    := SE2->E2_SALDO <= RS_TOLERANCIA .And. !Empty(SE2->E2_BAIXA)
+        jEst["movbaixa"] := SE2->E2_SALDO < SE2->E2_VALOR - RS_TOLERANCIA .Or. !Empty(SE2->E2_BAIXA)
+        jEst["recbco"]   := U_PXRSBuscaPagar(jEst["filial"], jEst["chave"])
+    EndIf
+Return jEst

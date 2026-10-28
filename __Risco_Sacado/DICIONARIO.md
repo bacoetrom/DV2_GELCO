@@ -14,11 +14,13 @@ Crie estes itens no Configurador (SIGACFG) **antes** de compilar e usar os fonte
 | `E2_XLOTRS` | C | 6 | 0 | Lote R.Sac. | Lote de risco sacado | Real | V | | | |
 | `E2_XBANCO` | C | 3 (= A6_COD) | 0 | Bco R.Sacad | Banco do risco sacado | Real | V | | | SA6 |
 | `E2_XDTRISC` | D | 8 | 0 | Dt.Env.Bco | Data em que o título foi disponibilizado ao banco | Real | V | | | |
-| `E2_XSTRIC` | C | 1 | 0 | Sit.R.Sacad | Situação do risco sacado | Real | V | `1=Disponivel;2=Antecipado;3=Em aberto` | | |
+| `E2_XSTRIC` | C | 1 | 0 | Sit.R.Sacad | Situação do risco sacado | Real | V | `1=Disponivel;2=Antecipado;3=Em aberto;9=Em processamento` | | |
 | `E2_XDTANT` | D | 8 | 0 | Dt.Antecip. | Data da antecipação pelo fornecedor | Real | V | | | |
 | `E2_XORIRS` | C | 40 | 0 | Orig.R.Sac. | Chave do título de origem (FILIAL+PREFIXO+NUM+PARCELA+TIPO+FORNECE+LOJA). Preenchido só no título a pagar do banco | Real | V | | | |
 
 Os campos são apenas visuais (`V`). Só a rotina `PXFINA37` os altera.
+
+**Situação `9` (Em processamento)** — gravada pela própria rotina antes de qualquer ExecAuto da antecipação ou do estorno. Um título fica nessa situação apenas quando o processo é interrompido e a compensação automática também falha; nesse estado toda movimentação do título é bloqueada (PEs `FINM020`, `FA080TIT`, `FA050UPD`, `F240TIT`) e a resolução é feita pela ação **Conciliar** da `PXFINA37`. Se o ambiente ainda não tiver o `9` no `X3_CBOX`, a rotina funciona (o campo é `C(1)`), mas o browse e o relatório mostram a descrição vinda de `U_PXRSDescSituacao`, não a do dicionário.
 
 > `E2_XORIRS` precisa comportar a soma dos tamanhos de `E2_FILIAL + E2_PREFIXO + E2_NUM + E2_PARCELA + E2_TIPO + E2_FORNECE + E2_LOJA` no ambiente. O padrão (2+3+9+2+3+6+2 = 27) cabe em 40.
 
